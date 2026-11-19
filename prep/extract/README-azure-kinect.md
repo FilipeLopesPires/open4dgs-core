@@ -126,6 +126,10 @@ Reference result for `datasets/professor` (6 devices, 1080p MJPEG, NFOV depth,
 
 ## Feeding the pipeline
 
+On Windows, `prep/windows/run_kinect_pipeline.ps1` runs every step from the MKV
+files to the exported 4DGS. See [prep/windows/README.md](../windows/README.md).
+The equivalent manual commands follow.
+
 Run these from `$OUT`. The capture is 30 fps and genlocked, so skip the visual
 sync solver (pipeline stage 4). Per-camera offsets are already in `sync.json`.
 
