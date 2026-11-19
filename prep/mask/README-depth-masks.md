@@ -188,4 +188,5 @@ cameras that see it vote foreground (`--mask-min-fg-fraction 0.75`,
   every frame you train on, or pass `--no-error-on-missing-mask`.
 
 Masked and unmasked initialisation produce different keyframes. Keep them in separate
-files (the Windows runner writes `keyframes_masked.npz` vs `keyframes.npz`).
+files (the Windows runner writes `keyframes_masked_f<start>-<end>.npz` vs
+`keyframes_f<start>-<end>.npz`).

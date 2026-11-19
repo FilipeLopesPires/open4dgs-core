@@ -8,7 +8,7 @@
     extract    undistorted frames + depth + sync.json      images\, depth\, sync.json
     calibrate  extrinsics from colour + depth              sparse\0, reference_export.json
     mask       foreground masks from multi-view depth      masks\, mask_report\masks.json
-    init       RoMa v2 + MEMFOF point initialisation       keyframes_masked.npz (keyframes.npz with -NoMasks)
+    init       RoMa v2 + MEMFOF point initialisation       keyframes_masked_f<start>-<end>.npz (keyframes_f... with -NoMasks)
     train      TriGS training (time-chunked by default)    runs\<Name>\trigs_ckpt.pt
     export     per-frame PLYs + .trigsbin timeline         runs\<Name>\plys\, runs\<Name>\<Name>.trigsbin
 
@@ -108,12 +108,12 @@ Run-Stage "mask" $maskDone `
 
 $initArgs = ""
 $trainArgs = ""
-$npzFile = "keyframes.npz"
+$npzStem = "keyframes"
 if ($useMasks) {
     if ((($Stages -contains "init") -or ($Stages -contains "train")) -and -not (Test-MasksComplete)) {
         throw "no complete mask set ($maskReport missing or from --qa-only): run the mask stage, or pass -NoMasks"
     }
-    $npzFile = "keyframes_masked.npz"
+    $npzStem = "keyframes_masked"
     $initArgs = " --masks-root masks"
     $trainArgs = " --masks-root masks --config.masked-rgb-loss"
     if ($PSBoundParameters.ContainsKey("AlphaOutsideWeight")) { $trainArgs += " --config.lambda-alpha-outside-mask $AlphaOutsideWeight" }
@@ -130,6 +130,12 @@ if ($FrameEnd -le 0) { $FrameEnd = $nFrames }
 $fps = 30
 if (Test-Path (Join-Path $Out "k4a_cameras.json")) { $fps = [double]((Get-Content (Join-Path $Out "k4a_cameras.json") -Raw | ConvertFrom-Json).fps) }
 $count = $FrameEnd - $FrameStart + 1
+if ($count -le 0) { throw "empty frame range $FrameStart..$FrameEnd" }
+if ($nFrames -gt 0 -and $FrameEnd -gt $nFrames) { throw "-FrameEnd $FrameEnd exceeds the $nFrames extracted frames" }
+# The frame range is part of the keyframe file name: a 3 s test and a full-clip run must not
+# share (and silently skip) each other's initialisation.
+$npzFile = "{0}_f{1:d4}-{2:d4}.npz" -f $npzStem, $FrameStart, $FrameEnd
+Write-Host "Frames $FrameStart..$FrameEnd ($count frames, $([math]::Round($count / $fps, 2)) s) -> $npzFile"
 
 Run-Stage "init" (Join-Path $Out $npzFile) `
     ("$py `"$Repo\prep\init\prep-roma-trigs-memory.py`" --reference-json reference_export.json --images-root images " +

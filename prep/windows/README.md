@@ -76,7 +76,7 @@ Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 | `extract` | `extract_azure_kinect.py extract` | `k4a_cameras.json` |
 | `calibrate` | `calibrate_azure_kinect.py` | `reference_export.json` |
 | `mask` | `prep\mask\depth_masks.py` | `mask_report\masks.json` (not one from a `--qa-only` run) |
-| `init` | `prep-roma-trigs-memory.py` | `keyframes_masked.npz`, or `keyframes.npz` with `-NoMasks` |
+| `init` | `prep-roma-trigs-memory.py` | `keyframes_masked_f<start>-<end>.npz`, or `keyframes_f<start>-<end>.npz` with `-NoMasks` |
 | `train` | `trigs-train-colmap` | `runs\<Name>\trigs_ckpt.pt` |
 | `export` | `trigs-export-plys` + `make-trigs-timeline.py` | `runs\<Name>\<Name>.trigsbin` |
 
@@ -95,13 +95,15 @@ subject) from the Kinect depth; see
 `mask_report\mask_sheet.jpg` before `init`. With masks:
 
 - `init` adds `--masks-root masks`: background (floor, walls) is not initialised. The
-  output is `keyframes_masked.npz`.
+  output is `keyframes_masked_f<start>-<end>.npz`, e.g. `keyframes_masked_f0001-0377.npz`.
+  The frame range is part of the name, so a short test (`-FrameEnd 90`) and a full-clip
+  run each keep their own initialisation instead of one silently reusing the other's.
 - `train` adds `--masks-root masks --config.masked-rgb-loss`: outside the mask there is
   no RGB loss and opacity is pushed to 0.
 
 | Parameter | Effect |
 |---|---|
-| `-NoMasks` | Skip the `mask` stage; `init` and `train` run without masks and use `keyframes.npz` (the behaviour before masks were added). |
+| `-NoMasks` | Skip the `mask` stage; `init` and `train` run without masks and use `keyframes_f<start>-<end>.npz` (the behaviour before masks were added). |
 | `-AlphaOutsideWeight <w>` | Adds `--config.lambda-alpha-outside-mask <w>` (trainer default 0.1). |
 | `-AlphaMaskWeight <w>` | Adds `--config.lambda-alpha-mask <w>` (trainer default 0.5). |
 
