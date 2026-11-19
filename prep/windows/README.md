@@ -10,7 +10,7 @@ Visual Studio 2022 17.14 (MSVC 14.44).
 | `fetch_cuda_redist.py` | Installs a user-local CUDA toolkit from NVIDIA's per-component redistributable archives, with SHA-256 checks. No system installer and no driver change. |
 | `fused-local-corr-msvc.patch` | Lets RoMa v2's CUDA correlation kernel build with MSVC. Upstream only ships Linux wheels. |
 | `smoke_test.py` | Runs one CUDA call through each native extension and loads the RoMa v2 and MEMFOF weights. |
-| `run_kinect_pipeline.ps1` | Takes an Azure Kinect capture to a trained 4DGS model in one command: inspect, extract, calibrate, init, train, export. |
+| `run_kinect_pipeline.ps1` | Takes an Azure Kinect capture to a trained 4DGS model in one command: inspect, extract, calibrate, mask, init, train, export. |
 
 ## Setup
 
@@ -68,17 +68,56 @@ powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
     -Capture datasets\professor -Rotate l
 ```
 
+Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
+
+| Stage | Runs | Skipped when this exists |
+|---|---|---|
+| `inspect` | `extract_azure_kinect.py inspect` | `k4a_report\inspect.json` |
+| `extract` | `extract_azure_kinect.py extract` | `k4a_cameras.json` |
+| `calibrate` | `calibrate_azure_kinect.py` | `reference_export.json` |
+| `mask` | `prep\mask\depth_masks.py` | `mask_report\masks.json` (not one from a `--qa-only` run) |
+| `init` | `prep-roma-trigs-memory.py` | `keyframes_masked.npz`, or `keyframes.npz` with `-NoMasks` |
+| `train` | `trigs-train-colmap` | `runs\<Name>\trigs_ckpt.pt` |
+| `export` | `trigs-export-plys` + `make-trigs-timeline.py` | `runs\<Name>\<Name>.trigsbin` |
+
 Each stage writes `<capture>\o4d\logs\<stage>.log` and is skipped when its output
 already exists. Pass `-Force` to redo a stage. `-Stages train,export -Name run2 -Steps 45000`
 re-trains under a new run name. Check the QA images listed in
 [README-azure-kinect.md](../extract/README-azure-kinect.md) after `calibrate` and before
-the long stages. Use `-Stages inspect,extract,calibrate` to stop there.
+the long stages. Use `-Stages inspect,extract,calibrate` to stop there, or
+`-Stages inspect,extract,calibrate,mask` to also check the masks.
+
+### Masks
+
+Masks are on by default. The `mask` stage writes `masks\<cam>\<frame>.png` (255 =
+subject) from the Kinect depth; see
+[prep/mask/README-depth-masks.md](../mask/README-depth-masks.md). Check
+`mask_report\mask_sheet.jpg` before `init`. With masks:
+
+- `init` adds `--masks-root masks`: background (floor, walls) is not initialised. The
+  output is `keyframes_masked.npz`.
+- `train` adds `--masks-root masks --config.masked-rgb-loss`: outside the mask there is
+  no RGB loss and opacity is pushed to 0.
+
+| Parameter | Effect |
+|---|---|
+| `-NoMasks` | Skip the `mask` stage; `init` and `train` run without masks and use `keyframes.npz` (the behaviour before masks were added). |
+| `-AlphaOutsideWeight <w>` | Adds `--config.lambda-alpha-outside-mask <w>` (trainer default 0.1). |
+| `-AlphaMaskWeight <w>` | Adds `--config.lambda-alpha-mask <w>` (trainer default 0.5). |
+
+The alpha weights are passed only when given. The trainer README's masked recipe uses
+`-AlphaOutsideWeight 1.0 -AlphaMaskWeight 0.05`; it has not been tuned for Kinect data.
+
+Masked and unmasked runs share the run folder `runs\<Name>` (default `full`), and
+`train` is skipped when that folder already has a checkpoint. To keep both, give each
+run its own name, for example `-NoMasks -Name nomask`.
 
 Measured on an RTX 3070 with the `professor` capture (6 cameras, 1080×1920, 377 frames):
 
 | Stage | Time | Notes |
 |---|---|---|
 | inspect + extract + calibrate | about 2.5 min | |
+| mask | 83 s | CPU only. The subject covers about 9–10% of each image. |
 | init (RoMa v2 precise + MEMFOF) | about 7 min per 31 frames | About 1.5 h for 377 frames. |
 | train | about 0.3 s/step at 31 frames | The 30k-step default is several hours. `-ChunkSeconds 3` (the default) trains 3 s windows so the full sequence fits in 8 GB. |
 | export | under 1 min | Per-frame PLYs plus a `.trigsbin` for the SuperSplat TRiGS editor. |

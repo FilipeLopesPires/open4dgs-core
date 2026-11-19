@@ -134,13 +134,24 @@ Run these from `$OUT`. The capture is 30 fps and genlocked, so skip the visual
 sync solver (pipeline stage 4). Per-camera offsets are already in `sync.json`.
 
 ```bash
+python "$REPO/prep/mask/depth_masks.py" --data-dir .
+# review mask_report/mask_sheet.jpg, then:
+
 python "$REPO/prep/init/prep-roma-trigs-memory.py" --reference-json reference_export.json \
   --images-root images --fps 30 --sync-json sync.json \
-  --frame-start 1 --frame-end <LAST> --output-path keyframes.npz
+  --frame-start 1 --frame-end <LAST> --masks-root masks --output-path keyframes_masked.npz
 
-trigs-train-colmap --data-dir . --output-dir runs/<name> --npz-path keyframes.npz \
-  --config.n-steps 30000
+trigs-train-colmap --data-dir . --output-dir runs/<name> --npz-path keyframes_masked.npz \
+  --masks-root masks --config.masked-rgb-loss --config.n-steps 30000
 ```
+
+The mask step writes `masks/<cam>/<frame:06d>.png` from the Kinect depth (255 =
+subject); see [prep/mask/README-depth-masks.md](../mask/README-depth-masks.md). With
+`--masks-root masks`, prep-roma does not initialise background points. The trainer
+needs `--config.masked-rgb-loss` as well; `--masks-root` alone only adds masked PSNR
+metrics. For an unmasked run, drop the mask step and both `--masks-root` and
+`--config.masked-rgb-loss`, and write `keyframes.npz` instead, so the two
+initialisations do not overwrite each other.
 
 The trainer reads `<data-dir>/sync.json` automatically. Do not pass
 `--timing-json` as well. Do not create a `frame_timestamps.json`: the trainer
@@ -151,11 +162,13 @@ would prefer it over `sync.json`.
 - **Few views.** Six cameras about 60° apart is far sparser than the 27 and 45
   camera example captures. Expect weaker novel views between cameras and more
   floaters. Masks help.
-- **Background.** Walls and the floor are visible to every camera.
-  `reference_export.json`'s `scene_meta` comes from the camera ring (radius about
-  1.5 m). prep-roma therefore drops triangulated points more than about 2.2 m from
-  the centre, so the room will not be initialised. Train with masks, or edit the
-  result in SuperSplat.
+- **Background.** Walls and the floor are visible to every camera. Without masks,
+  prep-roma initialises the floor and anything else within about 2.2 m of the centre
+  (the limit comes from `reference_export.json`'s `scene_meta`, built on the camera
+  ring of about 1.5 m radius), and training fits it. Use the depth masks
+  ([prep/mask/README-depth-masks.md](../mask/README-depth-masks.md); the `mask` stage
+  of the Windows runner, on by default) so that only the subject is initialised and
+  opacity outside it is trained to 0. Otherwise edit the result in SuperSplat.
 - **Rolling shutter.** The Kinect colour camera is rolling shutter and its readout
   time is not modelled. This matters little for slow motion. For fast motion,
   consider `--config.learn-camera-time-offsets` in the trainer.
