@@ -274,3 +274,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+
+# Local capture data (large, licence-restricted)
+datasets/
