@@ -8,9 +8,16 @@
     extract    undistorted frames + depth + sync.json      images\, depth\, sync.json
     calibrate  extrinsics from colour + depth              sparse\0, reference_export.json
     mask       foreground masks from multi-view depth      masks\, mask_report\masks.json
-    init       RoMa v2 + MEMFOF point initialisation       keyframes_masked_f<start>-<end>.npz (keyframes_f... with -NoMasks)
+    init       point initialisation (RoMa v2 + MEMFOF,     keyframes[_depth][_masked|_refined]_f<start>-<end>.npz
+               or measured depth with -Init depth)
     train      TriGS training (time-chunked by default)    runs\<Name>\trigs_ckpt.pt
     export     per-frame PLYs + .trigsbin timeline         runs\<Name>\plys\, runs\<Name>\<Name>.trigsbin
+
+  Added automatically when an option needs them and their output is missing:
+    refine       -MasksDir masks_refined   masks shrunk to the colour edge   masks_refined\, mask_report\refine.json
+    register     -DepthLoss                colour-registered depth maps      depth_registered\_complete.json
+    foregrounds  -Composite                straight foreground images        foregrounds[_refined]\_complete.json
+  foregrounds is also rebuilt when older than the mask report or not covering the frame range.
 
   Masks are on by default (prep\mask\depth_masks.py, see prep\mask\README-depth-masks.md):
   init drops background points (--masks-root masks) and train uses the masked RGB loss
@@ -19,8 +26,22 @@
   Masked and unmasked runs use different keyframe files, but the same run folder
   runs\<Name>: give each its own -Name to keep both.
 
-  -AlphaOutsideWeight / -AlphaMaskWeight set --config.lambda-alpha-outside-mask /
-  --config.lambda-alpha-mask; when omitted the trainer defaults apply.
+  Training options (passed only when given; otherwise the trainer defaults apply):
+    -AlphaOutsideWeight <w>  --config.lambda-alpha-outside-mask (trainer default 0.1)
+    -AlphaMaskWeight <w>     --config.lambda-alpha-mask (trainer default 0.5)
+    -MasksDir masks_refined  use the colour-refined masks (prep\mask\refine_masks.py, needs SAM 2)
+    -Composite               --config.masked-rgb-composite --foregrounds-root foregrounds[_refined]:
+                             supervise the whole frame against the subject matted on a white plate
+    -MaxAnisotropy <r>       --config.max-scale-anisotropy (largest/smallest axis; 0 = off)
+    -Init depth              initialise from the registered Kinect depth (prep\init\depth_init.py)
+                             instead of RoMa v2 + MEMFOF; -DepthInitPoints points per keyframe
+                             (default 60000), also passed as --config.target-count-per-keyframe
+    -DepthLoss <w>           --depth-root depth_registered --config.lambda-depth <w> (1.0 tested)
+    -TrainerSrc <dir>        run train/export with PYTHONPATH=<dir> (another trainer checkout's src)
+    -TrainExtra "<args>"     appended verbatim to the trigs-train-colmap command line
+  -DepthLoss needs a trainer with depth supervision (open4dgs-trigs-fork; see prep\windows\README.md).
+
+  Logs: logs\<stage>.log, except init-<keyframe file>.log, train-<Name>.log, export-<Name>.log.
 
   Review k4a_report\*.jpg and the console QA lines after inspect/calibrate, and
   mask_report\mask_sheet.jpg after mask, before spending hours on init/train
@@ -37,6 +58,11 @@
 .EXAMPLE
   # only re-train and export, 45k steps, stronger opacity penalty outside the mask, new run name
   ... -Capture datasets\professor -Rotate l -Stages train,export -Name long -Steps 45000 -AlphaOutsideWeight 1.0
+.EXAMPLE
+  # best tested quality recipe (3 s): refined masks, depth init, depth loss, composite, anisotropy cap
+  ... -Capture datasets\professor -Rotate l -Stages init,train,export -Name all3s -FrameEnd 90 `
+      -Steps 15000 -ChunkSeconds 0 -MasksDir masks_refined -Init depth -DepthLoss 1.0 `
+      -Composite -MaxAnisotropy 10 -AlphaOutsideWeight 1.0
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Capture,
@@ -169,8 +195,8 @@ if ($Init -eq "depth") {
 if ($PSBoundParameters.ContainsKey("DepthLoss")) {
     $trainArgs += " --depth-root depth_registered --config.lambda-depth $DepthLoss"
 }
-# -TrainerSrc: run train/export from another trainer checkout (e.g. C:\o4d\trigs-depth\src,
-# needed for -DepthLoss until that change is in the installed trainer).
+# -TrainerSrc: run train/export from another trainer checkout's src folder instead of the
+# installed trainer (e.g. to try a trainer branch without reinstalling).
 $trainerEnv = ""
 if ($TrainerSrc) {
     if (-not (Test-Path (Join-Path $TrainerSrc "trigs"))) { throw "-TrainerSrc $TrainerSrc has no trigs package" }
