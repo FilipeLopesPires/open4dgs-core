@@ -9,6 +9,10 @@ training (`trigs-train-colmap`); see [How the masks are used](#how-the-masks-are
 For RGB-only rigs (no depth), use `prep/mask/generate_masks.py` instead (Background
 Matting V2 with a clean plate, or SAM 2).
 
+The depth masks are deliberately loose (floor around the feet, wall pieces next to the
+head). `prep/mask/refine_masks.py` shrinks them to the colour edge and writes
+`masks_refined/`; see [README-refine-masks.md](README-refine-masks.md).
+
 On Windows, `prep/windows/run_kinect_pipeline.ps1` runs it as the `mask` stage, between
 `calibrate` and `init`.
 
