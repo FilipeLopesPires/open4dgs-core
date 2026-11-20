@@ -186,8 +186,15 @@ cameras that see it vote foreground (`--mask-min-fg-fraction 0.75`,
   `--config.lambda-alpha-mask` (default 0.5). The trainer README's masked recipe for
   `trigs-train-plys` uses `--config.lambda-alpha-outside-mask 1.0
   --config.lambda-alpha-mask 0.05`; it has not been tuned for this data.
-- Do not add `--config.masked-rgb-composite`: it also requires `--foregrounds-root`
-  (edge-decontaminated foreground images), which this script does not produce.
+- `--config.masked-rgb-composite` mattes the ground truth onto a constant plate instead
+  of replacing the prediction outside the mask. It also requires `--foregrounds-root`:
+  straight (un-premultiplied) foreground images whose soft mask edge carries subject
+  colour only. Build them with `prep/mask/straight_foregrounds.py --data-dir .
+  --masks-dir masks --output-dir foregrounds`. It keeps the captured colour in the mask's
+  solid core and inpaints the edge ring from that core, so the floor or wall inside the
+  safety margin is not learned as an opaque halo. The core erosion defaults to the mask's
+  `dilate_px + 2 * feather_px`, read from the `mask_report/*.json` written for that mask
+  folder.
 - The trainer stops with an error if a frame in the training window has no mask. Mask
   every frame you train on, or pass `--no-error-on-missing-mask`.
 
