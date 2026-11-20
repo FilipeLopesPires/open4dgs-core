@@ -53,7 +53,15 @@ param(
     [switch]$Force,
     [switch]$NoMasks,
     [double]$AlphaOutsideWeight,
-    [double]$AlphaMaskWeight
+    [double]$AlphaMaskWeight,
+    [double]$MaxAnisotropy,
+    [switch]$Composite,
+    [string]$TrainExtra = "",
+    [string]$MasksDir = "masks",
+    [ValidateSet("roma", "depth")][string]$Init = "roma",
+    [int]$DepthInitPoints = 60000,
+    [double]$DepthLoss,
+    [string]$TrainerSrc = ""
 )
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -63,10 +71,11 @@ New-Item -ItemType Directory -Force $Out, (Join-Path $Out "logs") | Out-Null
 $Out = (Resolve-Path $Out).Path
 if (-not (Test-Path $EnvCmd)) { throw "$EnvCmd not found; run prep\windows\setup_env.ps1 first" }
 
-function Run-Stage([string]$stage, [string]$done, [string]$cmdline) {
+function Run-Stage([string]$stage, [string]$done, [string]$cmdline, [string]$logName = "") {
     if ($Stages -notcontains $stage) { return }
     if ($done -and (Test-Path $done) -and -not $Force) { Write-Host "[$stage] skip (exists: $done)"; return }
-    $log = Join-Path $Out "logs\$stage.log"
+    if (-not $logName) { $logName = $stage }
+    $log = Join-Path $Out "logs\$logName.log"
     Write-Host "`n=== [$stage] $(Get-Date -Format 'HH:mm:ss') -> $log ===" -ForegroundColor Cyan
     $t = Get-Date
     & cmd.exe /d /c "call `"$EnvCmd`" >nul 2>&1 && cd /d `"$Out`" && $cmdline 2>&1" | Tee-Object -FilePath $log
@@ -75,7 +84,7 @@ function Run-Stage([string]$stage, [string]$done, [string]$cmdline) {
 }
 
 $Stages = @($Stages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$known = "inspect", "extract", "calibrate", "mask", "init", "train", "export"
+$known = "inspect", "extract", "calibrate", "mask", "refine", "register", "init", "train", "export"
 $bad = $Stages | Where-Object { $known -notcontains $_ }
 if ($bad) { throw "unknown stage(s): $bad (valid: $known)" }
 $useMasks = -not $NoMasks
@@ -95,32 +104,79 @@ Run-Stage "extract" (Join-Path $Out "k4a_cameras.json") `
 Run-Stage "calibrate" (Join-Path $Out "reference_export.json") `
     "$py `"$Repo\prep\align\calibrate_azure_kinect.py`" --data-dir . --overwrite"
 
-# masks.json is also written by a --qa-only tuning run (sample frames only); that does not count as done.
-$maskReport = Join-Path $Out "mask_report\masks.json"
-function Test-MasksComplete {
-    if (-not (Test-Path $maskReport)) { return $false }
-    return -not (Get-Content $maskReport -Raw | ConvertFrom-Json).qa_only
+# A mask report written by a --qa-only tuning run (sample frames only) does not count as done.
+function Test-ReportComplete([string]$report) {
+    if (-not (Test-Path $report)) { return $false }
+    return -not (Get-Content $report -Raw | ConvertFrom-Json).qa_only
 }
-$maskDone = ""
-if (Test-MasksComplete) { $maskDone = $maskReport }
-Run-Stage "mask" $maskDone `
+$coarseReport = Join-Path $Out "mask_report\masks.json"
+$coarseDone = ""
+if (Test-ReportComplete $coarseReport) { $coarseDone = $coarseReport }
+Run-Stage "mask" $coarseDone `
     "$py `"$Repo\prep\mask\depth_masks.py`" --data-dir ."
+
+# -MasksDir masks_refined: colour refinement of the depth masks (prep\mask\refine_masks.py,
+# needs SAM 2, see prep\mask\README-refine-masks.md); runs automatically when missing.
+$refined = $MasksDir -ne "masks"
+$maskReport = $coarseReport
+if ($useMasks -and $refined) {
+    if ($MasksDir -ne "masks_refined") { throw "-MasksDir must be masks or masks_refined" }
+    $maskReport = Join-Path $Out "mask_report\refine.json"
+    $refineDone = ""
+    if (Test-ReportComplete $maskReport) { $refineDone = $maskReport }
+    if (-not $refineDone -and (($Stages -contains "init") -or ($Stages -contains "train"))) { $Stages += "refine" }
+    Run-Stage "refine" $refineDone "$py `"$Repo\prep\mask\refine_masks.py`" --data-dir ."
+}
+function Test-MasksComplete { return (Test-ReportComplete $maskReport) }
+
+# -DepthLoss: colour-registered depth maps (the trainer's --depth-root contract).
+if ($PSBoundParameters.ContainsKey("DepthLoss") -and ($Stages -contains "train")) {
+    $regDone = Join-Path $Out "depth_registered\_complete.json"
+    if (-not (Test-Path $regDone)) { $Stages += "register" }
+    Run-Stage "register" $regDone "$py `"$Repo\prep\extract\k4a_register_depth.py`" --data-dir ."
+}
 
 $initArgs = ""
 $trainArgs = ""
 $npzStem = "keyframes"
+$fgDir = "foregrounds"
 if ($useMasks) {
     if ((($Stages -contains "init") -or ($Stages -contains "train")) -and -not (Test-MasksComplete)) {
         throw "no complete mask set ($maskReport missing or from --qa-only): run the mask stage, or pass -NoMasks"
     }
-    $npzStem = "keyframes_masked"
-    $initArgs = " --masks-root masks"
-    $trainArgs = " --masks-root masks --config.masked-rgb-loss"
+    $npzStem = if ($refined) { "keyframes_refined" } else { "keyframes_masked" }
+    if ($refined) { $fgDir = "foregrounds_refined" }
+    $initArgs = " --masks-root $MasksDir"
+    $trainArgs = " --masks-root $MasksDir --config.masked-rgb-loss"
     if ($PSBoundParameters.ContainsKey("AlphaOutsideWeight")) { $trainArgs += " --config.lambda-alpha-outside-mask $AlphaOutsideWeight" }
     if ($PSBoundParameters.ContainsKey("AlphaMaskWeight")) { $trainArgs += " --config.lambda-alpha-mask $AlphaMaskWeight" }
+    if ($Composite) {
+        # Composite the render over a white plate and supervise the whole frame (restores the
+        # photometric penalty on splats at the wrong depth); needs straight foreground RGB.
+        $trainArgs += " --config.masked-rgb-composite --foregrounds-root $fgDir"
+    }
 } elseif ($PSBoundParameters.ContainsKey("AlphaOutsideWeight") -or $PSBoundParameters.ContainsKey("AlphaMaskWeight")) {
     Write-Host "-AlphaOutsideWeight/-AlphaMaskWeight ignored with -NoMasks" -ForegroundColor Yellow
 }
+if ($Composite -and -not $useMasks) { throw "-Composite needs masks; drop -NoMasks" }
+if ($PSBoundParameters.ContainsKey("MaxAnisotropy")) { $trainArgs += " --config.max-scale-anisotropy $MaxAnisotropy" }
+if ($Init -eq "depth") {
+    $npzStem = $npzStem -replace "^keyframes", "keyframes_depth"
+    if (-not $useMasks) { $initArgs = " --masks-root none" }
+    # the trainer subsamples every keyframe to target-count-per-keyframe (default 25,862)
+    $trainArgs += " --config.target-count-per-keyframe $DepthInitPoints"
+}
+if ($PSBoundParameters.ContainsKey("DepthLoss")) {
+    $trainArgs += " --depth-root depth_registered --config.lambda-depth $DepthLoss"
+}
+# -TrainerSrc: run train/export from another trainer checkout (e.g. C:\o4d\trigs-depth\src,
+# needed for -DepthLoss until that change is in the installed trainer).
+$trainerEnv = ""
+if ($TrainerSrc) {
+    if (-not (Test-Path (Join-Path $TrainerSrc "trigs"))) { throw "-TrainerSrc $TrainerSrc has no trigs package" }
+    $trainerEnv = "set `"PYTHONPATH=$TrainerSrc`" && "
+}
+if ($TrainExtra) { $trainArgs += " $TrainExtra" }
 
 $nFrames = 0
 if (Test-Path (Join-Path $Out "k4a_cameras.json")) {
@@ -137,20 +193,44 @@ if ($nFrames -gt 0 -and $FrameEnd -gt $nFrames) { throw "-FrameEnd $FrameEnd exc
 $npzFile = "{0}_f{1:d4}-{2:d4}.npz" -f $npzStem, $FrameStart, $FrameEnd
 Write-Host "Frames $FrameStart..$FrameEnd ($count frames, $([math]::Round($count / $fps, 2)) s) -> $npzFile"
 
-Run-Stage "init" (Join-Path $Out $npzFile) `
-    ("$py `"$Repo\prep\init\prep-roma-trigs-memory.py`" --reference-json reference_export.json --images-root images " +
-     "--fps $fps --sync-json sync.json --frame-start $FrameStart --frame-end $FrameEnd " +
-     "--roma-v2-setting $RomaSetting --output-path $npzFile$initArgs")
+if ($Composite -and (($Stages -contains "train") -or ($Stages -contains "init"))) {
+    # Straight foregrounds for composite training; rebuilt when missing or older than the masks.
+    $fgDone = Join-Path $Out "$fgDir\_complete.json"
+    $fgStale = (-not (Test-Path $fgDone)) -or ((Get-Item $fgDone).LastWriteTime -lt (Get-Item $maskReport).LastWriteTime)
+    if (-not $fgStale) {
+        $fgRange = (Get-Content $fgDone -Raw | ConvertFrom-Json).frames
+        $fgStale = ($fgRange[0] -gt $FrameStart) -or ($fgRange[1] -lt $FrameEnd)
+    }
+    if ($fgStale -or $Force) {
+        $script:Stages += "foregrounds"
+        Run-Stage "foregrounds" "" ("$py `"$Repo\prep\mask\straight_foregrounds.py`" --data-dir . " +
+            "--masks-dir $MasksDir --output-dir $fgDir")
+    } else { Write-Host "[foregrounds] skip (exists: $fgDone)" }
+}
+
+$npzStemName = [System.IO.Path]::GetFileNameWithoutExtension($npzFile)
+if ($Init -eq "depth") {
+    Run-Stage "init" (Join-Path $Out $npzFile) `
+        ("$py `"$Repo\prep\init\depth_init.py`" --data-dir . --frame-start $FrameStart --frame-end $FrameEnd " +
+         "--fps $fps --target-points $DepthInitPoints --output-path $npzFile$initArgs") "init-$npzStemName"
+} else {
+    Run-Stage "init" (Join-Path $Out $npzFile) `
+        ("$py `"$Repo\prep\init\prep-roma-trigs-memory.py`" --reference-json reference_export.json --images-root images " +
+         "--fps $fps --sync-json sync.json --frame-start $FrameStart --frame-end $FrameEnd " +
+         "--roma-v2-setting $RomaSetting --output-path $npzFile$initArgs") "init-$npzStemName"
+}
 
 $chunk = ""
 if ($ChunkSeconds -gt 0) { $chunk = "--config.temporal-chunk-len-s $ChunkSeconds --config.temporal-chunk-visit-steps 1000" }
 Run-Stage "train" (Join-Path $Out "runs\$Name\trigs_ckpt.pt") `
-    "trigs-train-colmap --data-dir . --output-dir runs/$Name --npz-path $npzFile --config.n-steps $Steps $chunk$trainArgs"
+    "${trainerEnv}trigs-train-colmap --data-dir . --output-dir runs/$Name --npz-path $npzFile --config.n-steps $Steps $chunk$trainArgs" `
+    "train-$Name"
 
 Run-Stage "export" (Join-Path $Out "runs\$Name\$Name.trigsbin") `
-    ("trigs-export-plys --ckpt-path runs/$Name/trigs_ckpt.pt --output-dir runs/$Name/plys --n-frames $count --fps $fps && " +
+    ("${trainerEnv}trigs-export-plys --ckpt-path runs/$Name/trigs_ckpt.pt --output-dir runs/$Name/plys --n-frames $count --fps $fps && " +
      "$py `"$Repo\deliver\make-trigs-timeline.py`" from-checkpoint --output runs/$Name/$Name.trigsbin " +
      "--checkpoint runs/$Name/trigs_ckpt.pt --frame-rate $fps --total-frames $count " +
-     "--chunk-duration-seconds 2.5 --chunk-overlap-seconds 0 --tensor-dtype motion32 --overwrite --fade-frames 0")
+     "--chunk-duration-seconds 2.5 --chunk-overlap-seconds 0 --tensor-dtype motion32 --overwrite --fade-frames 0") `
+    "export-$Name"
 
 Write-Host "`nOutputs in $Out" -ForegroundColor Green
