@@ -124,4 +124,9 @@ Measured on an RTX 3070 with the `professor` capture (6 cameras, 1080×1920, 377
 | train | about 0.3 s/step at 31 frames | The 30k-step default is several hours. `-ChunkSeconds 3` (the default) trains 3 s windows so the full sequence fits in 8 GB. |
 | export | under 1 min | Per-frame PLYs plus a `.trigsbin` for the SuperSplat TRiGS editor. |
 
-To watch training, run `python -m trigs.core.viewer --watch <out>\runs\<name>\viewer_snapshots --port 8080`.
+To watch training, run `python -m trigs.core.viewer --watch <out>\runs\<name>\viewer_snapshots --port 8080 --up +y`.
+The calibration puts the floor at y = 0 with +Y up; without `--up +y` the viewer orbits
+around viser's default +Z axis and the subject appears lying on its side. Add
+`--no-spatial-filter` for a seated or standing subject: the viewer's default filter hides
+splats beyond 1.1x the 95th-percentile distance from the splat centre, which removes the
+shoe soles (the points farthest from the centre).

@@ -13,8 +13,9 @@ from the capture itself:
 4. Initial poses from a maximum spanning tree rooted at the reference camera.
 5. Joint bundle adjustment over poses and 3D points: pixel reprojection error plus a
    weak depth prior (keeps metric scale), Huber-robustified, with outlier rejection.
-6. World frame: floor plane detected from fused depth becomes y = 0, +Y up (the
-   convention of the trainer's viewer), origin under the point the cameras look at.
+6. World frame: floor plane detected from fused depth becomes y = 0, +Y up, origin
+   under the point the cameras look at. Open the result in the trainer's viewer with
+   ``--up +y`` (its default orbit up axis is viser's +Z).
 
 Outputs in ``--data-dir``::
 
