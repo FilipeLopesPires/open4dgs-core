@@ -43,6 +43,22 @@
 
   Logs: logs\<stage>.log, except init-<keyframe file>.log, train-<Name>.log, export-<Name>.log.
 
+  Export options (see prep\windows\README.md, "Export and file size"):
+    -FromRun <run>           export runs\<run>\trigs_ckpt.pt into runs\<Name> (no training;
+                             e.g. -Stages export -FromRun all3s -Name all3s_small)
+    -PruneOpacity <a>        drop rows with base opacity below <a> from the export copy
+                             (default 0.005; 0 keeps every row). trigs_ckpt.pt is never changed.
+    -TensorDtype <policy>    .trigsbin tensor dtypes: mixed (default; fp16 except times and
+                             durations), motion32, float16, float32
+    -PackChunkSeconds <s>    longest .trigsbin clip (default 10): a sequence up to <s> is one
+                             clip, a longer one is split into equal clips no longer than <s>
+    -NoPly                   skip the per-frame PLYs (about 47 MB per frame for 1 M splats)
+    -CompressPly             write the PLYs as frame_<n>.compressed.ply (PlayCanvas compressed
+                             format, about 3.9x smaller; SuperSplat reads it, plain 3DGS PLY
+                             readers do not)
+  The export copy carries the run's training config (from the final viewer snapshot), so the
+  PLYs and the .trigsbin use the temporal threshold the run was trained with.
+
   Review k4a_report\*.jpg and the console QA lines after inspect/calibrate, and
   mask_report\mask_sheet.jpg after mask, before spending hours on init/train
   (see prep\extract\README-azure-kinect.md).
@@ -76,6 +92,12 @@ param(
     [int]$FrameEnd = 0,
     [ValidateSet("turbo", "fast", "base", "precise")][string]$RomaSetting = "precise",
     [string]$EnvCmd = "C:\o4d\o4d-env.cmd",
+    [string]$FromRun = "",
+    [double]$PruneOpacity = 0.005,
+    [ValidateSet("mixed", "motion32", "float16", "float32")][string]$TensorDtype = "mixed",
+    [double]$PackChunkSeconds = 10.0,
+    [switch]$NoPly,
+    [switch]$CompressPly,
     [switch]$Force,
     [switch]$NoMasks,
     [double]$AlphaOutsideWeight,
@@ -252,11 +274,31 @@ Run-Stage "train" (Join-Path $Out "runs\$Name\trigs_ckpt.pt") `
     "${trainerEnv}trigs-train-colmap --data-dir . --output-dir runs/$Name --npz-path $npzFile --config.n-steps $Steps $chunk$trainArgs" `
     "train-$Name"
 
-Run-Stage "export" (Join-Path $Out "runs\$Name\$Name.trigsbin") `
-    ("${trainerEnv}trigs-export-plys --ckpt-path runs/$Name/trigs_ckpt.pt --output-dir runs/$Name/plys --n-frames $count --fps $fps && " +
-     "$py `"$Repo\deliver\make-trigs-timeline.py`" from-checkpoint --output runs/$Name/$Name.trigsbin " +
-     "--checkpoint runs/$Name/trigs_ckpt.pt --frame-rate $fps --total-frames $count " +
-     "--chunk-duration-seconds 2.5 --chunk-overlap-seconds 0 --tensor-dtype motion32 --overwrite --fade-frames 0") `
-    "export-$Name"
+# Export decodes a copy of the checkpoint (deliver\prepare_export_checkpoint.py): it carries
+# the run's training config, so the PLYs and the .trigsbin use the temporal threshold the run
+# was trained with, and leaves out rows below -PruneOpacity. trigs_ckpt.pt is never modified.
+# -FromRun exports another run's checkpoint into runs\<Name> without training.
+$srcRun = if ($FromRun) { $FromRun } else { $Name }
+if ($FromRun -and ($Stages -contains "train")) { throw "-FromRun exports an existing run; drop train from -Stages" }
+if (($Stages -contains "export") -and -not ($Stages -contains "train") -and
+    -not (Test-Path (Join-Path $Out "runs\$srcRun\trigs_ckpt.pt"))) {
+    throw "no checkpoint runs\$srcRun\trigs_ckpt.pt to export"
+}
+if ($PruneOpacity -lt 0 -or $PruneOpacity -ge 1) { throw "-PruneOpacity must be in [0, 1)" }
+if ($PackChunkSeconds -le 0) { throw "-PackChunkSeconds must be > 0" }
+$exportCkpt = "runs\$Name\export_ckpt.pt"
+$exportCmd = "$py `"$Repo\deliver\prepare_export_checkpoint.py`" --checkpoint runs\$srcRun\trigs_ckpt.pt " +
+    "--output $exportCkpt --min-opacity $PruneOpacity --n-frames $count --fps $fps --overwrite && "
+# Frame count and fps come from the export copy (the run's own values).
+if ($NoPly -and $CompressPly) { throw "-CompressPly needs the PLYs; drop -NoPly" }
+if (-not $NoPly) { $exportCmd += "${trainerEnv}trigs-export-plys --ckpt-path $exportCkpt --output-dir runs\$Name\plys && " }
+if ($CompressPly) {
+    $exportCmd += "$py `"$Repo\deliver\compress_plys.py`" --input-dir runs\$Name\plys --delete-source && "
+}
+$exportCmd += "$py `"$Repo\deliver\make-trigs-timeline.py`" from-checkpoint --output runs\$Name\$Name.trigsbin " +
+    "--checkpoint $exportCkpt --frame-rate $fps --max-chunk-duration-seconds $PackChunkSeconds " +
+    "--chunk-overlap-seconds 0 --tensor-dtype $TensorDtype --overwrite --fade-frames 0 && " +
+    "del `"$exportCkpt`""
+Run-Stage "export" (Join-Path $Out "runs\$Name\$Name.trigsbin") $exportCmd "export-$Name"
 
 Write-Host "`nOutputs in $Out" -ForegroundColor Green

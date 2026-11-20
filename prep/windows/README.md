@@ -95,7 +95,7 @@ Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 | `foregrounds` (with `-Composite`) | `prep\mask\straight_foregrounds.py` | `foregrounds[_refined]\_complete.json`, if newer than the mask report and covering the frame range |
 | `init` | `prep-roma-trigs-memory.py`, or `prep\init\depth_init.py` with `-Init depth` | the keyframe file, see below |
 | `train` | `trigs-train-colmap` | `runs\<Name>\trigs_ckpt.pt` |
-| `export` | `trigs-export-plys` + `make-trigs-timeline.py` | `runs\<Name>\<Name>.trigsbin` |
+| `export` | `deliver\prepare_export_checkpoint.py` + `trigs-export-plys` + `make-trigs-timeline.py` (see [Export and file size](#export-and-file-size)) | `runs\<Name>\<Name>.trigsbin` |
 
 `refine`, `register` and `foregrounds` are added automatically when the option that
 needs them is given and their output is missing; you do not list them in `-Stages`.
@@ -180,8 +180,8 @@ Result on an RTX 3070 (about 2.5 h of training, 3.8 GB of GPU memory):
   rewards overfitting them. It is also not comparable across modes: with `-Composite`
   the eval uses a binarised mask while training uses the soft mask. Judge runs by
   novel views, or hold a camera out for A/B tests.
-- 1.08 M splats; the `.trigsbin` is 353 MB for 3 s (24 MB for the run without depth
-  init). Reducing the size is open work.
+- 1.08 M splats; the `.trigsbin` was 353 MB for 3 s with the old export and is 178 MB
+  with the current defaults (see [Export and file size](#export-and-file-size)).
 
 Measured on an RTX 3070 with the `professor` capture (6 cameras, 1080×1920, 377 frames):
 
@@ -210,3 +210,76 @@ around viser's default +Z axis and the subject appears lying on its side. Add
 `--no-spatial-filter` for a seated or standing subject: the viewer's default filter hides
 splats beyond 1.1x the 95th-percentile distance from the splat centre, which removes the
 shoe soles (the points farthest from the centre).
+
+### Export and file size
+
+The `export` stage never reads or changes `trigs_ckpt.pt` beyond loading it. It runs:
+
+1. `deliver\prepare_export_checkpoint.py` writes `runs\<Name>\export_ckpt.pt`, a copy that
+   - carries the run's training config. `trigs_ckpt.pt` has none, so both exporters used
+     to fall back to defaults; the copy takes it from the final viewer snapshot
+     (`viewer_snapshots\latest.json`). The frame count and fps come from the same place,
+     so `-FrameEnd` is not needed for an export-only run.
+   - leaves out rows with base opacity below `-PruneOpacity` (default 0.005; 0 keeps all).
+2. `trigs-export-plys` writes `runs\<Name>\plys\` from the copy (skipped with `-NoPly`).
+   With `-CompressPly`, `deliver\compress_plys.py` then replaces each `frame_<n>.ply` by
+   `frame_<n>.compressed.ply`.
+3. `make-trigs-timeline.py from-checkpoint` writes `runs\<Name>\<Name>.trigsbin` from the
+   copy, then the copy is deleted (`export_ckpt.pt.json` records what was resolved).
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `-FromRun <run>` | | Export `runs\<run>\trigs_ckpt.pt` into `runs\<Name>`, without training. |
+| `-PruneOpacity <a>` | 0.005 | Rows with `sigmoid(opacity) < a` are not exported. |
+| `-TensorDtype <policy>` | `mixed` | `.trigsbin` dtypes. `mixed`: fp16 except `times` and `log_durations`. `motion32` (the old default) also keeps positions, rotations and motion in fp32. |
+| `-PackChunkSeconds <s>` | 10 | Longest `.trigsbin` clip. A sequence up to `s` long is one clip; a longer one is split into the fewest equal clips no longer than `s`. |
+| `-NoPly` | | No per-frame PLYs. |
+| `-CompressPly` | | PLYs in the PlayCanvas compressed format. SuperSplat reads it; tools that read only the standard 3DGS PLY layout do not. |
+
+Example: re-export the `all3s` run with the current settings, without retraining:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
+    -Capture datasets\professor -Stages export -FromRun all3s -Name all3s_compressed -CompressPly
+```
+
+**Temporal threshold.** Each row's opacity fades with a Gaussian in time, renormalised so it
+reaches zero at the threshold `tau` (`--config.temporal-active-threshold`, trainer default
+0.01). The packager used to fall back to 0.05 when the checkpoint recorded nothing, so the
+`.trigsbin` was packaged for a different fade than the one trained. It now takes the
+threshold from the export copy's config (falling back to the trainer default 0.01), and the
+PLY export uses the same config. The TRiGS editor does not read the threshold from the file:
+it renders with its own **Temporal opacity threshold** slider in the view options, default
+0.05. Set it to 0.010 to see the model as trained.
+
+**Clips.** A row is stored in every clip whose time range its temporal support touches. On
+the 3 s run, a clip boundary in the middle of the sequence is crossed by 0.42 M of the
+1.08 M rows, about 1.2 s worth of rows (0.36 M rows/s). So each boundary costs about
+1.2 s / chunk length: +47% at 2.5 s chunks, +23% at 5 s, +12% at 10 s. The old fixed 2.5 s
+chunks split the 3 s run into 2 clips (0 to 2.5 s, 2.5 to 3 s) and stored 31% of the rows
+twice. Longer clips keep more rows resident at once in the player; lower
+`-PackChunkSeconds` if the editor runs out of memory on a long capture.
+
+Measured on the 3 s `professor` run (`all3s`, 1,078,242 rows):
+
+| | `.trigsbin` | Rows stored | Bytes per row |
+|---|---|---|---|
+| Old export (2.5 s chunks, `motion32`, threshold 0.05) | 353,273,248 B | 1,412,874 | 250 |
+| Threshold fixed only (2.5 s chunks, `motion32`) | 366,864,883 B | 1,467,233 | 250 |
+| Current defaults (one clip, prune 0.005, `mixed`) | 178,010,350 B | 977,902 | 182 |
+
+The per-frame PLYs went from 6.78 GB (old export) to 1.74 GB with `-PruneOpacity 0.005`
+and `-CompressPly` (6.69 GB without `-CompressPly`).
+
+Quality, rendered from the 6 training cameras and 6 views halfway between neighbouring
+cameras at frames 0, 37, 74, 75, 76 and 89 (PSNR on the subject; the `.trigsbin` decoded
+from its tensors, tau from the file):
+
+| Comparison | Training views | Views between cameras |
+|---|---|---|
+| Current defaults vs threshold fixed only (compression) | 55.9 dB (min 52.7) | 55.0 dB (min 49.5) |
+| Threshold fixed vs old export (the fix) | 46.9 dB (min 32.4) | 45.8 dB (min 34.4) |
+| Against the masked ground truth: trained model / old export / fixed / current | 31.27 / 30.81 / 31.27 / 31.26 dB | |
+
+Pruning removes 9.3% of the rows. fp16 rounds a coordinate below 2 m to within 0.5 mm.
+Compressed PLYs score 45 dB against the uncompressed ones.

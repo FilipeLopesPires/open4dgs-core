@@ -1003,7 +1003,33 @@ def load_checkpoint_arrays(path: Path) -> tuple[dict[str, np.ndarray], dict[str,
                 except (TypeError, ValueError):
                     pass
                 break
+
+    # Training snapshots, and the export copy written by
+    # prepare_export_checkpoint.py, carry the run's training config.
+    config_threshold = config_temporal_cull_threshold(ckpt.get("config"))
+    if config_threshold is not None:
+        meta["configCullThreshold"] = config_threshold
     return arrays, flags, meta
+
+
+def config_temporal_cull_threshold(config: Any) -> float | None:
+    """The trainer's effective temporal cull threshold from a saved training config.
+
+    Mirrors ``TrigsTrainer._effective_temporal_cull_threshold``: the
+    ``temporal_active_cull_threshold`` override when > 0, never above
+    ``temporal_active_threshold``.
+    """
+    if config is not None and not isinstance(config, dict):
+        config = getattr(config, "__dict__", None)
+    if not isinstance(config, dict) or "temporal_active_threshold" not in config:
+        return None
+    try:
+        base = float(config["temporal_active_threshold"])
+        override = float(config.get("temporal_active_cull_threshold") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    value = override if override > 0.0 else base
+    return min(max(value, 1e-8), min(max(base, 1e-8), 1.0 - 1e-8))
 
 
 def _slice_arrays(arrays: dict[str, np.ndarray], keys: tuple[str, ...], mask: np.ndarray) -> dict[str, np.ndarray]:
@@ -1564,6 +1590,44 @@ def static_tensor_specs_compatible(
     return True
 
 
+# TrigsTrainingConfig.temporal_active_threshold default (open4dgs-trigs and its fork).
+TRAINER_DEFAULT_TEMPORAL_THRESHOLD = 0.01
+
+
+def resolve_temporal_threshold(
+    cli_value: float | None, meta: dict[str, Any]
+) -> tuple[float, str]:
+    """Temporal opacity threshold for row selection and the manifest, with its source.
+
+    Order: --temporal-threshold, the trainer's chunk metric, the checkpoint's saved
+    training config, then the trainer default. The packager used to fall back to
+    0.05, which does not match a run trained with the default 0.01.
+    """
+    if cli_value is not None:
+        return float(cli_value), "command_line"
+    if "trainerCullThreshold" in meta:
+        return float(meta["trainerCullThreshold"]), "trainer_metrics"
+    if "configCullThreshold" in meta:
+        return float(meta["configCullThreshold"]), "checkpoint_config"
+    return TRAINER_DEFAULT_TEMPORAL_THRESHOLD, "trainer_default"
+
+
+def balanced_chunk_duration(t_max: float, max_chunk_duration_s: float) -> float:
+    """Chunk length that splits [0, t_max] into equal chunks of at most the maximum.
+
+    A sequence no longer than the maximum stays one clip (the returned length is
+    >= t_max). Equal chunks avoid a short tail clip that stores the rows crossing
+    its boundary for little playback time.
+    """
+    max_chunk_duration_s = float(max_chunk_duration_s)
+    if max_chunk_duration_s <= 0.0:
+        raise ValueError("--max-chunk-duration-seconds must be > 0")
+    if t_max <= max_chunk_duration_s:
+        return max(max_chunk_duration_s, float(t_max))
+    n_chunks = math.ceil(float(t_max) / max_chunk_duration_s - 1e-9)
+    return float(t_max) / n_chunks
+
+
 def temporal_radius_scale(opacity_threshold: float) -> float:
     """Match the trainer's finite temporal support radius ``k * sigma``."""
     threshold = min(max(float(opacity_threshold), 1e-8), 1.0 - 1e-8)
@@ -1663,13 +1727,32 @@ def build_single_checkpoint_split_plan(
     total_frames: int | None,
     chunk_duration_s: float | None,
     chunk_overlap_s: float,
+    max_chunk_duration_s: float | None = None,
 ) -> tuple[list[list[float]], list[float], list[ClipSchedule], int, str]:
     """Build overlapping training ranges and non-overlapping playback cores."""
     fps = float(frame_rate)
     if fps <= 0.0:
         raise ValueError("frame rate must be positive")
+    if chunk_duration_s is not None and max_chunk_duration_s is not None:
+        raise ValueError(
+            "pass --chunk-duration-seconds or --max-chunk-duration-seconds, not both"
+        )
 
     trainer_windows = meta.get("trainerWindows")
+    balanced = max_chunk_duration_s is not None
+    if balanced:
+        if total_frames is not None:
+            frames_for_plan = int(total_frames)
+        else:
+            frames_for_plan = inferred_checkpoint_frame_count(meta, fps)
+            if frames_for_plan is None:
+                raise ValueError(
+                    "cannot infer sequence length; pass --total-frames with "
+                    "--max-chunk-duration-seconds"
+                )
+        chunk_duration_s = balanced_chunk_duration(
+            float(max(frames_for_plan - 1, 0)) / fps, float(max_chunk_duration_s)
+        )
     if chunk_duration_s is None:
         if not isinstance(trainer_windows, list) or not trainer_windows:
             raise ValueError(
@@ -1692,7 +1775,7 @@ def build_single_checkpoint_split_plan(
             chunk_duration_s=float(chunk_duration_s),
             overlap_s=float(chunk_overlap_s),
         )
-        source = "fixed_duration"
+        source = "balanced_max_duration" if balanced else "fixed_duration"
 
     if not windows:
         raise ValueError("split plan contains no windows")
@@ -2369,19 +2452,23 @@ def convert_from_single_checkpoint(args: argparse.Namespace) -> int:
                 total_frames=args.total_frames,
                 chunk_duration_s=args.chunk_duration_seconds,
                 chunk_overlap_s=float(args.chunk_overlap_seconds),
+                max_chunk_duration_s=args.max_chunk_duration_seconds,
             )
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    if args.temporal_threshold is None:
-        threshold = float(meta.get("trainerCullThreshold", 0.05))
-        threshold_source = (
-            "trainer_metrics" if "trainerCullThreshold" in meta else "default"
+    threshold, threshold_source = resolve_temporal_threshold(
+        args.temporal_threshold, meta
+    )
+    if threshold_source == "trainer_default":
+        print(
+            "WARNING: checkpoint records no temporal threshold (no trainer metric, no "
+            f"config); using the trainer default {threshold:g}. Pass --temporal-threshold "
+            "if the run changed --config.temporal-active-threshold, or package the copy "
+            "written by prepare_export_checkpoint.py.",
+            file=sys.stderr,
         )
-    else:
-        threshold = float(args.temporal_threshold)
-        threshold_source = "command_line"
     if not 0.0 < threshold < 1.0:
         raise SystemExit("--temporal-threshold must be between 0 and 1")
     extra_margin_s = float(args.temporal_extra_margin_seconds)
@@ -2922,10 +3009,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Overlap for --chunk-duration-seconds. Ignored when trainer windows are used. Default: 0.5",
     )
     p_single.add_argument(
+        "--max-chunk-duration-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Split into the fewest equal fixed-duration windows no longer than this; a "
+            "sequence up to this long becomes one clip. Exclusive with --chunk-duration-seconds."
+        ),
+    )
+    p_single.add_argument(
         "--temporal-threshold",
         type=float,
         default=None,
-        help="Temporal opacity support threshold. Defaults to the checkpoint trainer metric, then 0.05.",
+        help=(
+            "Temporal opacity support threshold. Defaults to the checkpoint trainer metric, "
+            f"then the checkpoint's training config, then {TRAINER_DEFAULT_TEMPORAL_THRESHOLD} "
+            "(the trainer default)."
+        ),
     )
     p_single.add_argument(
         "--temporal-extra-margin-seconds",
