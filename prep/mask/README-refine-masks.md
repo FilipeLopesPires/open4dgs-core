@@ -117,6 +117,82 @@ The coarse masks are still the right input for `refine_masks.py` itself and rema
 safer choice when a subject part is thin, fast and poorly coloured (see
 [Limitations](#limitations)).
 
+## Multi-view consistency pass (optional)
+
+`prep/mask/consistent_masks.py` is an opt-in post-pass over the refined masks that uses all
+cameras of a frame at once (`refine_masks.py` itself is unchanged). Each camera decides on
+its own, so a part that one camera drops is learned as transparent from that view: on
+`professor` (frames 1, 40, 90) 5.3% of the masked depth points of one camera land outside
+another camera's refined mask, 11% at the top of the head (hair against a dark wall, no
+ToF depth on dark hair) and 13% at the chair seat height (black chair shell: no depth at
+all, so the coarse depth mask has a hole that refining cannot fill; laptop lid edges).
+
+```bash
+python "$REPO/prep/mask/consistent_masks.py" --data-dir . --frames 1-90 --unknown --workers 3
+python "$REPO/prep/mask/straight_foregrounds.py" --data-dir . --masks-dir masks_consistent \
+    --output-dir foregrounds_consistent --workers 4
+```
+
+Per frame, at depth resolution:
+
+1. **Source points**: each camera's registered depth inside its mask (eroded by
+   `--src-erode-px`), edge-safe (3×3 depth range < `--edge-tol` 3 cm, no flying pixels)
+   and in the subject volume (above the floor by `--floor-margin`, inside the stage +
+   `--stage-margin`), back-projected to world.
+2. **Support**: the points of the other cameras are projected into camera j and splatted
+   (`--splat-px` closing). A camera *supports* a pixel when its points agree with j's depth
+   (`--depth-tol` 4 cm) or j has no depth there; points in front of j's measured surface
+   (j sees the wall through them) are *weak*; points behind it are occluded.
+3. **Restore** (outside j's mask, within `--band-px` 16 px of it, components touching the
+   mask): ≥ `--min-views` (2) supporting cameras, or j's own edge-safe subject-volume depth
+   (refine's depth-subject test: above floor, inside the stage, not behind the local
+   subject) confirmed by ≥ 1 camera (`--keep-volume`, default on). Snapped to colour edges
+   with the same guided filter and feather as `refine_masks.py` and merged; the input mask
+   is never reduced. `--min-width-px` > 0 drops thin slivers.
+4. **Unknown** (`--unknown`): pixels in the band with 1 supporting camera or weak support
+   only, and enclosed no-depth blobs next to the mask (no image border, < 2% of the image
+   (`--nodepth-max-frac`), ≥ 15% of the rim on the mask, almost no background depth above
+   floor level on the rim: the chair shell). Each kind can be switched off
+   (`--no-unknown-weak`, `--no-unknown-nodepth-holes`).
+
+Outputs: `masks_consistent/<cam>/<frame:06d>.png`, `mask_report/consistent.json`
+(per-camera area gain, unknown fraction, temporal IoU; `params.dilate_px` lets
+`straight_foregrounds.py` find the core erosion) and `consistent_sheet.jpg` (added pixels
+green, unknown magenta, input outline white). About 0.75 s per frame with 3 workers on the
+CPU (~5 min for 377 frames); each worker holds one frame of all cameras (images, masks,
+depth and full-resolution float maps: a few hundred MB).
+
+### Mask file contract: grey + confidence alpha
+
+Without `--unknown` every mask is a plain 8-bit greyscale PNG. With it, a frame with unknown
+pixels is an 8-bit grey+alpha PNG (PIL mode `LA`): grey = the mask as before (0 background,
+255 subject, soft edge), alpha = confidence (255 known, 0 unknown, intermediate = soft
+weight); unknown pixels always have grey < 128. A plain greyscale PNG means "all known".
+Readers that load with `cv2.IMREAD_GRAYSCALE`, `IMREAD_COLOR` or PIL `.convert("L")` see the
+plain mask (all of `prep/mask`, `prep/init`, `prep/align`, `prep/extract`).
+`downscale_mask_outputs.py` keeps the alpha (both channels shrunk with INTER_AREA). Code
+that reads with `cv2.IMREAD_UNCHANGED` gets 4 channels (B = G = R = grey, A = confidence),
+and raw PIL / imageio arrays have 2 channels; such readers must take channel 0 as the mask.
+The trainer ignores unknown pixels in its mask and composite losses.
+
+### Results (professor, frames 1–90)
+
+Silhouette consistency (fraction of camera-i masked depth points, not occluded, outside
+≥ 1 other mask; frames 1, 40, 90):
+
+| | Overall | 0001 | 0002 | 0003 | 0004 | 0005 | 0006 | Head band | Chair band |
+|---|---|---|---|---|---|---|---|---|---|
+| `masks_refined` | 5.3% | 2.6 | 4.0 | 6.2 | 5.2 | 7.6 | 6.5 | 11% | 13% |
+| `masks_consistent` | 4.2% | 1.7 | 3.5 | 5.7 | 4.3 | 5.4 | 4.6 | 8% | 12% |
+| … unknown pixels not counted | 1.3% | 1.0 | 0.8 | 1.1 | 1.5 | 2.0 | 1.5 | 2% | 1% |
+
+Frames 1, 10, 20, 31, 60: 5.3% → 4.1% (1.2% with unknown not counted). Area gain per camera
+(median over frames 0.0–0.4%, max 0.9%); unknown 0.2–0.5% of the image (3–5% of the mask
+area) for cameras 0001, 0002, 0005, 0006 and 1.0% (15%) for 0003 and 0004, where the chair
+shell has no depth. Temporal IoU unchanged (within 0.001). `--min-views 1` restores more
+(+2% area in 0003/0004, 5.3% → 2.7%, mostly real chair and hair edges on the QA sheet), but
+a single view cannot tell a miss from calibration spill, so the default labels it unknown.
+
 ## SAM 2
 
 Install once into the pipeline environment (CUDA extension not needed):
@@ -209,7 +285,13 @@ shoe tips, the open laptop lid (also seen edge-on) and the chair seat and back a
 
 - The refined mask cannot recover a part that the coarse mask misses by more than
   `--max-grow-px`, except where the SAM 2 person mask covers it (up to
-  `--person-grow-px`). Thin chair legs that the depth mask dropped stay dropped.
+  `--person-grow-px`). Thin chair legs that the depth mask dropped stay dropped, and so
+  does the black chair shell, which has no ToF depth in any camera (the consistency pass
+  labels it unknown).
+- Refining drops few pixels with subject-volume depth (30–80 edge-safe pixels per camera
+  and frame at half resolution on `professor`, all decided by GrabCut colour, none by the
+  unclaimed-pixel rule); `consistent_masks.py --keep-volume` restores those that another
+  camera confirms.
 - Without depth, background with the subject's colour next to the subject (dark wall next
   to dark hair, grey floor next to grey trousers) can stay in the mask. Without SAM 2, the
   unclaimed-pixel rule is off and shoe toes clipped by the coarse mask are not restored.

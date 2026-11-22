@@ -324,5 +324,57 @@ class SourceAgnosticTests(unittest.TestCase):
         self.assertGreater(np.linalg.norm(c_off - truth), 0.005)
 
 
+class DepthOffsetTests(unittest.TestCase):
+    def test_offset_source_moves_points_along_rays(self):
+        class Fake:
+            name = "fake"
+
+            def points_cam(self, ci, frame):
+                return np.array([[0.1, -0.2, 1.0], [0.3, 0.0, 2.0]], np.float32)
+
+        src = MODULE.OffsetDepthSource(Fake(), np.array([0.0, 0.015]))
+        P0 = Fake().points_cam(0, 1)
+        np.testing.assert_array_equal(src.points_cam(0, 1), P0)  # zero offset: unchanged
+        P = src.points_cam(1, 1)
+        np.testing.assert_allclose(P[:, 2], P0[:, 2] + 0.015, atol=1e-6)
+        np.testing.assert_allclose(P[:, :2] / P[:, 2:], P0[:, :2] / P0[:, 2:], atol=1e-6)
+        self.assertEqual(src.name, "fake+offsets")
+
+    def test_offsets_json_must_cover_every_camera(self):
+        cams = [MODULE.dm.CameraPose(f, np.eye(3), np.zeros(4), 10, 10, np.eye(3), np.zeros(3)) for f in ("0001", "0002")]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "o.json"
+            p.write_text(json.dumps({"contract": "...", "offsets_m": {"0001": 0.01, "0002": -0.002}}))
+            np.testing.assert_allclose(MODULE.load_depth_offsets(p, cams), [0.01, -0.002])
+            p.write_text(json.dumps({"offsets_m": {"0001": 0.01}}))
+            with self.assertRaises(SystemExit):
+                MODULE.load_depth_offsets(p, cams)
+
+    def test_biased_depth_corrected(self):
+        """Each camera measures depth too near/far by 2 cm: the offsets file restores the sphere."""
+        offs = {f"{i + 1:04d}": (0.02 if i % 2 else -0.02) for i in range(N_CAMS)}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "rig"
+            write_rig(root)
+            for cam, o in offs.items():
+                for p in (root / "depth_registered" / cam).glob("*.npy"):
+                    D = np.load(p)
+                    np.save(p, np.where(D > 0, D - o, 0).astype(np.float32))  # measured = true - offset
+            (root / "depth_offsets.json").write_text(json.dumps({"offsets_m": offs}))
+            raw = run(root, name="raw.npz")
+            fixed = run(root, "--depth-offsets-json", "depth_offsets.json", name="fixed.npz")
+
+        def surface_err(z, f):
+            P = z["positions"][z["source_frames"].reshape(-1) == f]
+            return np.abs(np.linalg.norm(P - (C0 + V * (f - 1)), axis=1) - RADIUS)
+
+        for f in (1, 3, 5):
+            self.assertLess(np.median(surface_err(fixed, f)), 0.003, f)
+            self.assertGreater(np.median(surface_err(raw, f)), 2 * np.median(surface_err(fixed, f)), f)
+        np.testing.assert_allclose(fixed["depth_offsets_m"], [offs[k] for k in sorted(offs)], atol=1e-7)
+        self.assertEqual(list(fixed["depth_offsets_cameras"]), sorted(offs))
+        self.assertNotIn("depth_offsets_m", raw)
+
+
 if __name__ == "__main__":
     unittest.main()

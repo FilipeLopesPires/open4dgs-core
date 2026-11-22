@@ -81,6 +81,12 @@ def downscale_foreground(
     return np.dstack((out_rgb, out_a))
 
 
+def _is_grey_alpha(image: np.ndarray) -> bool:
+    """OpenCV decodes a grey+alpha PNG with IMREAD_UNCHANGED as BGRA with B == G == R."""
+    return (image.ndim == 3 and image.shape[2] == 4 and np.array_equal(image[..., 0], image[..., 1])
+            and np.array_equal(image[..., 0], image[..., 2]))
+
+
 def _to_dtype(x: np.ndarray, dtype) -> np.ndarray:
     info = np.iinfo(dtype)
     return np.clip(np.rint(x), info.min, info.max).astype(dtype)
@@ -90,7 +96,11 @@ def write_png_atomic(path: Path, image: np.ndarray) -> None:
     """Write a PNG without leaving a partial final file after interruption."""
     temporary = path.with_name(f".{path.stem}.tmp-{os.getpid()}{path.suffix}")
     try:
-        if not cv2.imwrite(str(temporary), image):
+        if image.ndim == 3 and image.shape[2] == 2:  # grey + confidence alpha (OpenCV cannot write it)
+            from PIL import Image
+
+            Image.fromarray(image, mode="LA").save(str(temporary), format="PNG")
+        elif not cv2.imwrite(str(temporary), image):
             raise OSError(f"OpenCV failed to write: {temporary}")
         os.replace(temporary, path)
     finally:
@@ -105,14 +115,20 @@ def _process(task: tuple[str, str, str, int, str | None]) -> str:
     if image is None:
         raise OSError(f"Could not read {src}")
     if kind == "mask":
-        if image.ndim == 3:
+        if _is_grey_alpha(image):
+            # grey + confidence alpha (consistent_masks.py --unknown): shrink both channels
+            out = np.dstack((downscale_mask(image[..., 0], factor), downscale_mask(image[..., 3], factor)))
+        elif image.ndim == 3:
             raise ValueError(f"Expected a single-channel mask: {src} has shape {image.shape}")
-        out = downscale_mask(image, factor)
+        else:
+            out = downscale_mask(image, factor)
         result = "ok"
     else:
         weight = None
         if not (image.ndim == 3 and image.shape[2] == 4) and mask_src and Path(mask_src).exists():
             weight = cv2.imread(mask_src, cv2.IMREAD_UNCHANGED)
+            if weight is not None and weight.ndim == 3:  # grey + alpha mask: the grey is the matte
+                weight = weight[..., 0]
         out = downscale_foreground(image, factor, weight)
         has_weight = (image.ndim == 3 and image.shape[2] == 4) or weight is not None
         result = "ok" if has_weight else "unweighted"

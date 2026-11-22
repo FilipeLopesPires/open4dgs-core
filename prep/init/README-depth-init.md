@@ -153,6 +153,7 @@ trainer uses `source_frames` (not `times`) for timing when `--start-frame` /
 | `--target-points` | 60000 | Max points per keyframe. The voxel size follows from it (7.2 mm on the professor capture). |
 | `--keyframe-step` | 5 | Same as prep-roma. |
 | `--depth-source`, `--depth-dir`, `--depth-scale` | auto | As in `depth_masks.py`. |
+| `--depth-offsets-json` | — | Per-camera additive depth corrections from `prep/extract/k4a_depth_offsets.py` (see [Depth offsets](#depth-offsets)). Off by default. |
 | `--masks-root`, `--mask-pattern` | masks | `none` disables masks; the result then contains the whole room. |
 | `--work-scale` | 0.5 | Depth, edge filter and flow grid relative to the colour image. |
 | `--velocity-delta` | 0 = (step+1)//2 | Flow baseline in frames. Depth noise in the velocity falls as 1/d (measured below). A larger d also smooths over fast motion. |
@@ -164,6 +165,22 @@ trainer uses `source_frames` (not `times`) for timing when `--start-frame` /
 | `--export-ply-dir` | — | Writes `depth_init_f<frame>.ply` per keyframe (xyz, rgb, vx vy vz). |
 | `--stats-path` | — | JSON with per-keyframe counts, speeds and timings. |
 | `--workers` | min(6, CPUs) | Threads over cameras. |
+
+## Depth offsets
+
+`--depth-offsets-json depth_offsets.json` reads `offsets_m` (metres, keyed by camera
+folder) from the output of `prep/extract/k4a_depth_offsets.py` (see
+[README-azure-kinect.md](../extract/README-azure-kinect.md#per-camera-depth-offsets)). It
+adds each camera's offset to the colour-camera z of every valid depth point at load:
+the point moves along its colour ray, and invalid depth stays invalid. This works for
+every `--depth-source`. A camera missing from the file is an error. The NPZ records the
+offsets as `depth_offsets_m` (float32 [C]) and `depth_offsets_cameras` (folder names);
+`--stats-path` records them too. Without the option nothing changes.
+
+On the professor capture (frames 1–31, `masks_refined`, 60,000 target points), the
+corrected run (`keyframes_depth_refined_doff_f0001-0031.npz`) fuses into a voxel of
+6.8–6.9 mm against 7.0–7.1 mm without offsets: the six cameras' surfaces coincide
+better. Both runs took 14 s.
 
 ## Measured on the professor capture
 

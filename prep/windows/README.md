@@ -82,6 +82,11 @@ powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
     -Capture datasets\professor -Rotate l
 ```
 
+This processes the whole capture with the [default recipe](#default-recipe--preset-best) and
+ends with `runs\full\full.asog` for the three.js player ([Play in the browser](#play-in-the-browser)).
+Training takes about 0.6 s per step, i.e. about 100 s per frame: about 10 h for the
+377-frame `professor` capture on an RTX 3070.
+
 Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 
 | Stage | Runs | Skipped when this exists |
@@ -91,18 +96,22 @@ Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 | `calibrate` | `calibrate_azure_kinect.py` | `reference_export.json` |
 | `mask` | `prep\mask\depth_masks.py` | `mask_report\masks.json` (not one from a `--qa-only` run) |
 | `refine` (with `-MasksDir masks_refined`) | `prep\mask\refine_masks.py` | `mask_report\refine.json` (not one from a `--qa-only` run) |
+| `consistent` (with `-MasksDir masks_consistent`) | `prep\mask\consistent_masks.py --unknown` for the frame range | `mask_report\consistent.json` covering the frame range, newer than `refine.json` |
+| `offsets` (with `-DepthOffsets`) | `prep\extract\k4a_depth_offsets.py` | `depth_offsets.json` |
 | `register` (with `-DepthLoss`) | `prep\extract\k4a_register_depth.py` | `depth_registered\_complete.json` |
 | `foregrounds` (with `-Composite`) | `prep\mask\straight_foregrounds.py` | `foregrounds[_refined]\_complete.json`, if newer than the mask report and covering the frame range |
 | `init` | `prep-roma-trigs-memory.py`, or `prep\init\depth_init.py` with `-Init depth` | the keyframe file, see below |
 | `train` | `trigs-train-colmap` | `runs\<Name>\trigs_ckpt.pt` |
 | `export` | `deliver\prepare_export_checkpoint.py` + `trigs-export-plys` + `make-trigs-timeline.py` (see [Export and file size](#export-and-file-size)) | `runs\<Name>\<Name>.trigsbin` |
+| `asog` | `asog encode` from the `animated-sog-fork` checkout next to this repo (`-AsogRepo` to change), on the CPU | `runs\<Name>\<Name>.asog` |
 
-`refine`, `register` and `foregrounds` are added automatically when the option that
+`refine`, `consistent`, `offsets`, `register` and `foregrounds` are added automatically when the option that
 needs them is given and their output is missing; you do not list them in `-Stages`.
 
-The keyframe file is `keyframes[_depth][_masked|_refined]_f<start>-<end>.npz`: `_depth`
-with `-Init depth`, `_masked` with the default masks, `_refined` with
-`-MasksDir masks_refined`, neither with `-NoMasks`. Each combination keeps its own file.
+The keyframe file is `keyframes[_depth][_masked|_refined|_consistent][_doff]_f<start>-<end>.npz`:
+`_depth` with `-Init depth`, `_masked` with the default masks, `_refined` with
+`-MasksDir masks_refined`, `_consistent` with `-MasksDir masks_consistent`, neither with
+`-NoMasks`; `_doff` with `-Init depth -DepthOffsets`. Each combination keeps its own file.
 
 Each stage writes `<capture>\o4d\logs\<stage>.log`; `init`, `train` and `export` write
 `init-<keyframe file>.log`, `train-<Name>.log` and `export-<Name>.log`, so runs do not
@@ -157,7 +166,65 @@ masks to remove that ambiguity. All are off by default.
 | `-TrainExtra "<args>"` | Appended verbatim to the `trigs-train-colmap` command. |
 | `-TrainerSrc <dir>` | Runs `train` and `export` with `PYTHONPATH=<dir>`, to try another trainer checkout without reinstalling it. |
 
-Best tested recipe, 3 s of the `professor` capture:
+Further options (trainer branch `quality-fixes` of `open4dgs-trigs-fork`, e.g. with
+`-TrainerSrc`; all off by default):
+
+| Parameter | Effect |
+|---|---|
+| `-HoldoutViews <i>[,<j>]` | Leaves cameras out of training (0-based position in the sorted camera folders: `3` = `0004`) and scores them as `psnr/holdout_*`, `depth/holdout_*` in TensorBoard. The only metric that measures views the model was not fitted to; use it for every A/B test. |
+| `-MasksDir masks_consistent` | Cross-view vote over the refined masks (`consistent` stage, `prep\mask\consistent_masks.py --unknown` for the frame range, then `foregrounds_consistent`): restores mask misses that at least two other cameras' depth supports, and marks pixels the cameras disagree on as unknown (mask PNG alpha), which the trainer leaves out of its mask losses. See [README-refine-masks.md](../mask/README-refine-masks.md). |
+| `-DepthOffsets` | Per-camera Kinect depth corrections (`offsets` stage, `prep\extract\k4a_depth_offsets.py` → `depth_offsets.json`), applied to `-Init depth` (keyframe file `..._doff_...`) and to the `-DepthLoss` targets. See [README-azure-kinect.md](../extract/README-azure-kinect.md). |
+| `-DepthEdgePx <px>` | `--config.depth-edge-px` (trainer default 1): depth pixels this close to a hole or depth jump are not supervised. `2` halves the background-contaminated depth pixels along the silhouette for 6% fewer supervised pixels. |
+| `-DepthLossFinal <s>` | Keeps `-DepthLoss` until step `-DepthDecayStart` (5000), then lowers it log-linearly to `-DepthLoss × s` over `-DepthDecaySteps` (2000). Suggested `0.15`. |
+| `-LearnAppearance` | `--config.learn-camera-appearance`: a colour gain and bias per camera. The cameras' exposures differ by up to ±10% (`0005` +11%, `0006` −8%); without it the splat colours average them. |
+| `-RandomBackground` | `--config.masked-rgb-random-bg` (with `-Composite`): a random plate colour per rendered camera, so the white plate cannot be learned into the edge splats. |
+| `-MaxAnisotropy 4` | Candidate instead of 10: with 10, the 99th percentile of the splats' long/middle axis ratio sits at the cap (full 3 s run). Not yet checked on thin parts (fingers, laptop lid edge-on) over a full run. |
+| `-ShDegree <0-3>` | `--sh-degree` (default 3). Lower degrees give six cameras less view-dependent colour to overfit. |
+| `-DepthDistortion <w>` | `--config.lambda-depth-distortion` from step `-DepthDistortionStart`: pulls the splats a pixel sees towards one depth. |
+| `-OpacityBinary <w>` | `--config.lambda-opacity-binary` from step `-OpacityBinaryStart`: pushes opacities to 0 or 1 (late in training). |
+| `-LearnTimeOffsets` | `--config.learn-camera-time-offsets` (from step 8000; `-TrainExtra "--config.camera-time-offset-warmup-steps <n>"` to change). The rig is hardware-synced, so expect offsets near 0. Do not set `--config.rs-readout-ms` without a measured readout. |
+
+Smoke tests of these options (frames 1–31, 1500 steps, camera `0004` held out, on top of
+the 3 s recipe below; metrics at step 1000, so only large differences mean anything):
+
+| Run | Held-out masked / interior PSNR | Held-out depth median / p90 | Notes |
+|---|---|---|---|
+| recipe | 16.5 / 18.8 dB | 16.4 / 63 mm | median opacity 0.084, 2.7% above 0.5 |
+| `-DepthDistortion 100 -DepthDistortionStart 300` | 15.4 / 17.4 dB | 9.6 / 35 mm | geometry much tighter in the held-out view, colour −1 dB: try 10–30 |
+| + `-OpacityBinary 0.05 -OpacityBinaryStart 750 -MaxAnisotropy 4` | 15.0 / 16.9 dB | 9.0 / 36 mm | median opacity 1.0 (90% above 0.5): far too strong, try 0.005 late |
+| `-DepthOffsets -DepthEdgePx 2 -DepthLossFinal 0.15` (decay 600–1000) | 16.1 / 18.1 dB | 14.8 / 61 mm | |
+| `-LearnAppearance -RandomBackground` | 16.4 / 18.8 dB | 13.6 / 44 mm | learned gains did not reproduce the measured exposure ratios in 1500 steps |
+| `-MasksDir masks_consistent -ShDegree 1 -LearnTimeOffsets` | 17.1 / 18.8 dB | 16.2 / 64 mm | masked PSNR leaves unknown pixels out; one offset reached the 8.3 ms clamp |
+
+### Default recipe (`-Preset best`)
+
+The runner applies this recipe unless an option is given on the command line (`-Preset basic`
+restores the trainer defaults):
+
+```
+-MasksDir masks_refined -Init depth -DepthLoss 1.0 -Composite -AlphaOutsideWeight 1.0
+-MaxAnisotropy 10 -DepthOffsets -DepthEdgePx 2   -Steps = 165 x frames (rounded to 1000)
+```
+
+It was chosen with A/B runs on frames 1–31 (5000 steps, camera `0004` held out; metrics at
+step 4000):
+
+| Run | Held-out depth median / p90 | Held-out PSNR full / interior | Training-camera interior PSNR |
+|---|---|---|---|
+| qA0: 3 s recipe below | 16.9 / 44.6 mm | 22.41 / 19.25 dB | 39.71 dB |
+| **qA1: + `-DepthOffsets -DepthEdgePx 2`** | **13.7 / 39.5 mm** | **22.28 / 19.43 dB** | **39.81 dB** |
+| qA2: qA1 + `-DepthDistortion 20` (from 1000) + `-OpacityBinary 0.005` (from 3500) | 11.5 / 33.3 mm | 21.93 / 18.73 dB | 38.31 dB |
+
+- qA1 makes the geometry about 20% more accurate in the held-out view at the same colour.
+- The depth-distortion term (qA2) tightens the geometry further but costs about 0.5 dB of
+  colour in the held-out view and 1.4 dB on the training cameras, so it stays opt-in.
+- qA1 and qA2 also passed `-DepthLossFinal 0.15`, but with the default `-DepthDecayStart
+  5000` the decay never started in a 5000-step run. Constant depth loss is what was tested,
+  so the recipe leaves `-DepthLossFinal` off.
+- Novel views between the cameras look nearly the same for all three. The views next to the
+  held-out camera are slightly cleaner with qA2.
+
+Earlier recipe, 3 s of the `professor` capture:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
@@ -177,9 +244,10 @@ Result on an RTX 3070 (about 2.5 h of training, 3.8 GB of GPU memory):
 - The trainer's masked eval PSNR is 26.8 dB. A run without the depth options scored
   35.6 dB but broke in the views between cameras. By default no camera is held out
   (`--config.holdout-views` is empty), so this metric scores the training cameras and
-  rewards overfitting them. It is also not comparable across modes: with `-Composite`
-  the eval uses a binarised mask while training uses the soft mask. Judge runs by
-  novel views, or hold a camera out for A/B tests.
+  rewards overfitting them. That trainer also binarised the mask in the composite eval
+  while training used the soft mask, which capped a perfect fit at about 30 dB (fixed
+  since; the trainer also logs `psnr/eval_interior`). Judge runs by novel views, or hold
+  a camera out (`-HoldoutViews`) for A/B tests.
 - 1.08 M splats; the `.trigsbin` was 353 MB for 3 s with the old export and is 178 MB
   with the current defaults (see [Export and file size](#export-and-file-size)).
 
@@ -210,6 +278,26 @@ around viser's default +Z axis and the subject appears lying on its side. Add
 `--no-spatial-filter` for a seated or standing subject: the viewer's default filter hides
 splats beyond 1.1x the 95th-percentile distance from the splat centre, which removes the
 shoe soles (the points farthest from the centre).
+
+### Play in the browser
+
+The `asog` stage converts the `.trigsbin` to Animated SOG with the
+[animated-sog](https://github.com/FilipeLopesPires/animated-sog) fork: about 9x smaller (the
+3 s `professor` clip: 178 MB → 20.5 MB), with full spherical harmonics. It passes
+`--quat-order wxyz` (the exporter labels its wxyz quaternions `xyzw`), `--transform z180`
+(our world is +Y up, `.asog` is y down) and keeps the trained temporal threshold (0.01). Other
+encoder options go through `-AsogArgs`, e.g. `-AsogArgs '--prune','0'` keeps the 30% of the
+dynamic splats the encoder drops by default. The encode runs on the CPU: about 10 min per
+million splats.
+
+Serve the player and open the URL the stage prints:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -SkipEncode -Serve
+# http://localhost:8765/animated-sog-fork/examples/three/?src=/open4dgs-core-fork/datasets/<capture>/o4d/runs/<Name>/<Name>.asog
+```
+
+The server shares the folder that holds both repositories; three.js comes from a CDN.
 
 ### Export and file size
 

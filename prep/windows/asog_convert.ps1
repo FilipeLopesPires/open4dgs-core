@@ -23,7 +23,8 @@
   powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -SkipEncode -Serve  # player only
 #>
 param(
-    [string]$Run = "all3s_compressed",        # run folder under datasets\professor\o4d\runs, holding <Run>.trigsbin
+    [string]$Capture = "",                    # capture folder (default: datasets\professor); runs in <Capture>\o4d\runs
+    [string]$Run = "all3s_compressed",        # run folder under <Capture>\o4d\runs, holding <Run>.trigsbin
     [string]$Trigsbin = "",                   # explicit input (default: runs\<Run>\<Run>.trigsbin)
     [string]$Out = "",                        # explicit output (default: runs\asog\<Run>.asog)
     [string[]]$EncodeArgs = @(),              # extra `asog encode` options
@@ -37,7 +38,8 @@ $ErrorActionPreference = "Stop"
 $Core = (Resolve-Path "$PSScriptRoot\..\..").Path                        # open4dgs-core-fork
 $Root = Split-Path $Core -Parent                                          # Open4DGS (both repos)
 $Fork = Join-Path $Root "animated-sog-fork"
-$Runs = Join-Path $Core "datasets\professor\o4d\runs"
+if (-not $Capture) { $Capture = Join-Path $Core "datasets\professor" }
+$Runs = Join-Path (Resolve-Path $Capture).Path "o4d\runs"
 if (-not $Trigsbin) { $Trigsbin = Join-Path $Runs "$Run\$Run.trigsbin" }
 if (-not $Out) { $Out = Join-Path $Runs "asog\$Run.asog" }
 New-Item -ItemType Directory -Force (Split-Path $Out -Parent) | Out-Null

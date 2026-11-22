@@ -124,6 +124,79 @@ Reference result for `datasets/professor` (6 devices, 1080p MJPEG, NFOV depth,
 - Bundle adjustment: 0.40 px median reprojection, 4 mm median depth residual.
 - Cameras sit on a ring of about 1.45 m radius, 1.74–1.80 m above the floor.
 
+## Per-camera depth offsets
+
+Each Kinect's ToF depth carries its own bias. On the calibrated rig, neighbouring
+cameras disagree about the depth of the same surface by a constant offset of up to 15 mm.
+`prep/extract/k4a_depth_offsets.py` measures that disagreement on the subject and
+solves for one additive correction per camera. Run it after `k4a_register_depth.py`
+and the masks:
+
+```bash
+python "$REPO/prep/extract/k4a_depth_offsets.py" --data-dir .   # -> depth_offsets.json
+```
+
+Inputs are the generic registered-depth contract (`depth_registered/`, z-depth of the
+colour camera), `reference_export.json` and a mask directory (`--masks-dir`, default
+`masks_refined`). Nothing in it is Kinect-specific.
+
+**Method.** The script samples `--num-frames` (12) frames spread over the clip. For
+every frame and ordered camera pair (i, j) it takes camera i's depth inside its mask
+eroded by 4 px, away from depth edges (7×7 depth range ≤ 1.5%) and on surfaces that face
+both cameras within 60° (`--max-view-angle`; this drops far-side matches). It lifts
+those pixels to 3D, projects them into j and takes the residual z_j(point) − d_j
+(bilinear, edge-safe, inside j's mask). It gates the residuals twice, then takes the
+median. Each pair's frame medians are combined by their median over frames. With
+corrections o the residual becomes r + c·o_i − o_j, where c = (n·ray_i)/(n·ray_j) for
+surface normal n. It is *not* the z-component of ray i in j, because j's lookup slides
+along the surface. A least-squares fit over the pairs gives o. `--huber-mm` turns on
+IRLS.
+
+**Gauge.** A common shift of all cameras only enters through c − 1. That is small,
+since the overlapping surfaces face both cameras, and it looks the same as a rig-scale
+error. The fit includes the shift and `--gauge mean` (the default) removes it: the
+corrections sum to zero and keep the depth level that the calibration scale was fitted
+to. `--gauge free` keeps it, but it is not reliable. For an independent check the
+script also compares colour-triangulated points (`--gauge-points`, default
+`k4a_report/calibration_points.npy`, or a COLMAP `points3D.txt`) with the measured depth
+at their projections. That check is reported, never applied. `sparse/0` from
+`calibrate_azure_kinect.py` has no 3D points.
+
+**Output contract** (`depth_offsets.json`):
+
+| Key | Content |
+|---|---|
+| `contract` | `"metres to ADD to every valid depth value of the camera (z along the colour optical axis)"` |
+| `offsets_m` | `{camera folder: metres}`. Add it to valid depth only; 0 stays invalid. |
+| `gauge` | `mean` or `free` |
+| `frames` | the frames sampled |
+| `pair_residual_rms_mm` | `{before, after}` over the pair equations |
+| `per_pair` | per ordered pair `"0001->0002"`: points, frames, c, residual before and after, frame medians |
+| `per_frame_offsets_mm`, `per_frame_spread_mm` | the same solve on each frame alone, and its std per camera |
+| `free_solution`, `gauge_points` | the common-shift diagnostics described above |
+
+Consumers: `prep/init/depth_init.py --depth-offsets-json`. The trainer's depth loss
+implements the same contract.
+
+**Measured on `datasets/professor`** (12 frames over all 377, `masks_refined`, 12 s on
+CPU). Twelve neighbour pairs were measured; opposite cameras never pass the facing test.
+
+- Offsets to add: 0001 −7.4, 0002 −9.5, 0003 −0.6, 0004 +4.7, 0005 +6.3, 0006 +6.5 mm.
+- Pair residual RMS: 9.0 → 4.1 mm. The largest pair goes from 15.4 to 4.2 mm.
+- Stable over time: per-frame solves have a std of 0.4–0.8 mm and stay within ±1.6 mm of
+  the result over the whole clip. Changing the erosion, the facing angle (45°), the masks,
+  IRLS or the frames (1–90 only) moves the offsets by ≤ 1.5 mm. At 75°, three grazing
+  pairs are admitted (RMS 5.9 mm) and the offsets shrink by up to 6 mm.
+- The fit leaves 4.1 mm RMS. The residual has a lateral gradient within each pair (up
+  to ±10 mm across the subject), which a per-camera z offset cannot model. The likely
+  cause is calibration or depth→colour registration error.
+- Common shift: not identifiable. The free solution gives −6.4 mm (conditioning 0.07),
+  but it varies from −0.3 to −13 mm between settings. The calibration points (1,989,
+  mostly background, median depth 1.8–2.6 m) give −5.8 mm. Per camera, though, they
+  differ from the subject offsets by −11.8 to +2.9 mm (std 5 mm), so the ToF bias likely
+  depends on distance and material. Hence the default
+  `--gauge mean`.
+
 ## Feeding the pipeline
 
 On Windows, `prep/windows/run_kinect_pipeline.ps1` runs every step from the MKV

@@ -5,7 +5,10 @@ Writes the same NPZ schema as ``prep-roma-trigs-memory.py`` (consumed by
 ``trigs-train-colmap --npz-path``), but the points come from the depth of every camera
 instead of RoMa matches.  Depth is read through the source-agnostic depth sources of
 ``prep/mask/depth_masks.py`` (``--depth-source auto|registered|k4a``); nothing here is
-specific to one sensor.
+specific to one sensor.  With ``--depth-offsets-json`` (output of
+``prep/extract/k4a_depth_offsets.py``) each camera's additive depth correction is added to
+the colour-camera z of its valid depth at load; the offsets are recorded in the NPZ
+(``depth_offsets_m``, ``depth_offsets_cameras``).
 
 Per keyframe t (every ``--keyframe-step`` frames of ``--frame-start..--frame-end``):
 
@@ -314,6 +317,40 @@ def load_sync_offsets(path: Path | None, cams, fps: float) -> np.ndarray:
     if missing:
         print(f"[sync] WARNING: no offset for cameras {missing}; using 0")
     return off
+
+
+def load_depth_offsets(path: Path, cams) -> np.ndarray:
+    """Per-camera additive depth corrections (metres) from a ``k4a_depth_offsets.py`` JSON
+    (``offsets_m`` keyed by camera folder; a plain {folder: metres} object also works)."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    table = raw.get("offsets_m", raw) if isinstance(raw, dict) else None
+    if not isinstance(table, dict):
+        raise SystemExit(f"{path}: expected an 'offsets_m' object keyed by camera folder")
+    missing = [c.folder for c in cams if c.folder not in table]
+    if missing:
+        raise SystemExit(f"{path}: no depth offset for cameras {missing}")
+    return np.array([float(table[c.folder]) for c in cams], np.float64)
+
+
+class OffsetDepthSource:
+    """Wraps a depth source and adds a per-camera offset to the colour-camera z of every
+    valid depth point (the point moves along its colour-camera ray; invalid depth was
+    never a point, so it stays invalid)."""
+
+    def __init__(self, source, offsets: np.ndarray):
+        self.source = source
+        self.offsets = np.asarray(offsets, np.float64)
+        self.name = f"{source.name}+offsets"
+
+    def points_cam(self, ci: int, frame: int) -> np.ndarray:
+        P = self.source.points_cam(ci, frame)
+        o = float(self.offsets[ci])
+        if o == 0.0 or len(P) == 0:
+            return P
+        z = P[:, 2].astype(np.float64)
+        keep = (z > 0) & (z + o > 0)
+        s = (z[keep] + o) / z[keep]
+        return (P[keep].astype(np.float64) * s[:, None]).astype(np.float32)
 
 
 class Inputs:
@@ -654,6 +691,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--depth-source", default="auto", choices=["auto", "registered", "k4a"])
     g.add_argument("--depth-dir", default=None, help="default: depth_registered (registered) / depth (k4a)")
     g.add_argument("--depth-scale", type=float, default=0.001, help="registered PNG metres per unit")
+    g.add_argument("--depth-offsets-json", default=None,
+                   help="per-camera additive depth corrections (prep/extract/k4a_depth_offsets.py output): "
+                        "offsets_m[camera] is added to the colour-camera z of every valid depth point")
     g.add_argument("--sync-json", default="sync.json",
                    help="per-camera capture offsets (s); used when the file exists. 'none' disables")
     g.add_argument("--fps", type=float, default=30.0)
@@ -714,6 +754,14 @@ def main(argv=None) -> int:
         a.masks_root = None
     cams = dm.load_cameras(data, a.reference_json)
     source = dm.make_source(a.depth_source, data, cams, a.depth_dir, a.depth_scale)
+    depth_offsets = None
+    if a.depth_offsets_json:
+        op = Path(a.depth_offsets_json)
+        op = op if op.is_absolute() or op.exists() else data / op
+        depth_offsets = load_depth_offsets(op, cams)
+        source = OffsetDepthSource(source, depth_offsets)
+        print(f"[depth_init] depth offsets from {op} (mm, added to valid depth): "
+              + ", ".join(f"{c.folder}={o * 1000:+.1f}" for c, o in zip(cams, depth_offsets)))
     if a.frame_start is None or a.frame_end is None:
         f0, f1 = dm.detect_frame_range(data / a.images_root, cams, Path(a.image_pattern).suffix.lstrip("."))
         a.frame_start = f0 if a.frame_start is None else a.frame_start
@@ -757,8 +805,12 @@ def main(argv=None) -> int:
         out = data / out
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.stem + ".tmp.npz")
+    extra = {}
+    if depth_offsets is not None:
+        extra = dict(depth_offsets_m=depth_offsets.astype(np.float32),
+                     depth_offsets_cameras=np.array([c.folder for c in cams]))
     np.savez_compressed(
-        tmp, **arrays,
+        tmp, **arrays, **extra,
         frame_start=np.array(0, np.int32), frame_end=np.array(a.frame_end - a.frame_start, np.int32),
         n_keyframes=np.array(len(keyframes), np.int32), keyframe_step=np.array(a.keyframe_step, np.int32),
         source_frame_start=np.array(a.frame_start, np.int32), source_frame_end=np.array(a.frame_end, np.int32),
@@ -777,7 +829,10 @@ def main(argv=None) -> int:
     if a.stats_path:
         sp = Path(a.stats_path)
         sp = sp if sp.is_absolute() else data / sp
-        sp.write_text(json.dumps({"args": vars(a), "depth_source": source.name, "keyframes": infos,
+        sp.write_text(json.dumps({"args": vars(a), "depth_source": source.name,
+                                  "depth_offsets_m": None if depth_offsets is None else
+                                  {c.folder: float(o) for c, o in zip(cams, depth_offsets)},
+                                  "keyframes": infos,
                                   "rows": n, "seconds": round(elapsed, 1)}, indent=1, default=str) + "\n",
                       encoding="utf-8")
     return 0
