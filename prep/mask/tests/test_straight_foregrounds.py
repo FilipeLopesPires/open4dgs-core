@@ -20,6 +20,8 @@ import numpy as np
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "straight_foregrounds.py"
+# Worker processes (spawn on Windows) re-import the module by name.
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("straight_foregrounds", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
