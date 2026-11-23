@@ -33,6 +33,8 @@ uv sync --locked --inexact --preview-features extra-build-dependencies
 
 The guide also includes Windows instructions. The documented main preparation
 workflow uses Ubuntu; it has not been validated end to end on Windows.
+[Notes from one Windows 11 machine](prep/SETUP.md#windows-11-with-nvidia-gpus)
+list the programs that ran there.
 
 ## 3. Add preparation tools to the same environment
 

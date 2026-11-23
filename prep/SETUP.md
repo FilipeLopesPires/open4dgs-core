@@ -15,7 +15,8 @@ versions and should keep their own environments (listed below).
 The shared environment shown here matches the current TriGS machine setup:
 Ubuntu 24.04, Python 3.11, NVIDIA driver 595.84, Conda CUDA toolkit 12.8, and
 PyTorch 2.10.0+cu128. It was smoke-tested on an RTX 3090. Each host needs its
-own environment and any native extensions rebuilt for its GPU.
+own environment and any native extensions rebuilt for its GPU. Notes from
+one [Windows 11 machine](#windows-11-with-nvidia-gpus) follow the Linux setup.
 
 ## 1. Install system tools
 
@@ -527,6 +528,63 @@ the shared `trigs` environment unless their guide explicitly says so:
 Before adding a new package to a shared environment, check the workflow's
 existing setup notes: the repo contains pipelines pinned to different Python,
 PyTorch, and CUDA versions.
+
+## Windows 11 with NVIDIA GPUs
+
+These notes come from one Windows 11 machine with an RTX PRO 6000 Blackwell
+Workstation Edition. They are not a validation of the preparation workflow on
+Windows. Both repositories were at v0.1.0 and checked out side by side. The
+environment was the trainer's `.venv`, built with the
+[trainer's Windows recipe](https://github.com/ASU-NEM-Labs/open4dgs-trigs/blob/main/SETUP.md#windows-11-with-nvidia-gpus)
+with `set DISTUTILS_USE_SDK=1` added (Python 3.11, PyTorch 2.10.0+cu128). The
+following programs ran natively, without WSL 2, to the end without errors:
+
+- `prep/sync/calculate-sync.py`
+- `prep/init/prep-roma-trigs-memory.py`, with the default backends (RoMa v2
+  `fast` and MEMFOF) and `--timing-json`
+- `deliver/make-trigs-timeline.py from-checkpoint`
+
+Frame extraction, the mask tools, COLMAP and the bash scripts were not used.
+With the checkouts side by side, initialization found the trainer's helper
+files without `OPEN4DGS_TRIGS` set.
+
+A trainer `uv sync` can remove separately installed packages, as the trainer's
+[shared-environment notes](https://github.com/ASU-NEM-Labs/open4dgs-trigs/blob/main/SETUP.md#sharing-an-environment-with-preparation-tools)
+explain, so install the preparation backends after it. In Command Prompt, from
+the trainer project directory:
+
+```bat
+set UV_CACHE_DIR=C:\uv-cache
+uv pip install --python .venv\Scripts\python.exe ^
+  "git+https://github.com/Parskatt/RoMaV2.git@v2.0.1"
+uv pip install --python .venv\Scripts\python.exe ^
+  "git+https://github.com/msu-video-group/memfof.git@a51de9fc59c6fe20ba08e079372c7b583d58a712"
+```
+
+RoMa v2 marks its `fused-local-corr` requirement as Linux-only, so it is not
+installed on Windows. RoMa v2 then uses its PyTorch local-correlation path, and
+no CUDA extension is compiled for these two packages.
+
+The commands in this guide, the README and `docs/run-pipeline.md` are written
+for bash. In Command Prompt, continue
+lines with `^`, use `set` in place of `export`, write `$REPO` as `%REPO%`, and
+call the environment's `python.exe` directly; a uv-created Windows environment
+has no `python3`. For example, the initialization command:
+
+```bat
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+set REPO=C:\path\to\open4dgs-core
+set TRIGS=C:\path\to\open4dgs-trigs
+cd /d D:\path\to\capture
+"%TRIGS%\.venv\Scripts\python.exe" "%REPO%\prep\init\prep-roma-trigs-memory.py" ^
+  --reference-json reference_export.json --images-root images ^
+  --frame-start <FIRST_FRAME> --frame-end <LAST_FRAME> ^
+  --timing-json timing.json --output-path keyframes.npz
+```
+
+The two UTF-8 settings match the trainer recipe. Runs without them were not
+tried.
 
 ## Blackwell GPUs
 
