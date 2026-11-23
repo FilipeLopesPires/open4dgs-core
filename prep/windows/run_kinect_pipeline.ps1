@@ -13,7 +13,7 @@
     train      TriGS training (time-chunked by default)    runs\<Name>\trigs_ckpt.pt
     export     per-frame PLYs + .trigsbin timeline         runs\<Name>\plys\, runs\<Name>\<Name>.trigsbin
     asog       Animated SOG for the three.js player        runs\<Name>\<Name>.asog
-               (animated-sog-fork next to this repo, or -AsogRepo; CPU only; -AsogArgs for encoder options)
+               (animated-sog: installed package or -AsogRepo checkout; -AsogArgs for encoder options)
 
   -Preset best (default) applies the tested recipe to every option not given on the command line:
     -MasksDir masks_refined -Init depth -DepthLoss 1.0 -Composite -AlphaOutsideWeight 1.0
@@ -103,26 +103,26 @@
 
 .EXAMPLE
   # whole capture with the default recipe, up to the .asog for the three.js player
-  powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 -Capture datasets\professor -Rotate l
+  powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 -Capture datasets\<capture> -Rotate l
 .EXAMPLE
   # stop after the masks to review mask_report\mask_sheet.jpg
-  ... -Capture datasets\professor -Rotate l -Stages inspect,extract,calibrate,mask
+  ... -Capture datasets\<capture> -Rotate l -Stages inspect,extract,calibrate,mask
 .EXAMPLE
   # unmasked run next to the masked default run "full"
-  ... -Capture datasets\professor -Rotate l -NoMasks -Name nomask
+  ... -Capture datasets\<capture> -Rotate l -NoMasks -Name nomask
 .EXAMPLE
   # only re-train and export, 45k steps, stronger opacity penalty outside the mask, new run name
-  ... -Capture datasets\professor -Rotate l -Stages train,export -Name long -Steps 45000 -AlphaOutsideWeight 1.0
+  ... -Capture datasets\<capture> -Rotate l -Stages train,export -Name long -Steps 45000 -AlphaOutsideWeight 1.0
 .EXAMPLE
   # best tested quality recipe (3 s): refined masks, depth init, depth loss, composite, anisotropy cap
-  ... -Capture datasets\professor -Rotate l -Stages init,train,export -Name all3s -FrameEnd 90 `
+  ... -Capture datasets\<capture> -Rotate l -Stages init,train,export -Name all3s -FrameEnd 90 `
       -Steps 15000 -ChunkSeconds 0 -MasksDir masks_refined -Init depth -DepthLoss 1.0 `
       -Composite -MaxAnisotropy 10 -AlphaOutsideWeight 1.0
 .EXAMPLE
   # the same with the quality options (see prep\windows\README.md "Quality options"), camera 0004 held out
   ... -Stages init,train,export -Name q3s -FrameEnd 90 -Steps 15000 -ChunkSeconds 0 `
       -MasksDir masks_refined -Init depth -DepthLoss 1.0 -Composite -MaxAnisotropy 4 -AlphaOutsideWeight 1.0 `
-      -DepthOffsets -DepthEdgePx 2 -LearnAppearance -HoldoutViews 3 -TrainerSrc C:\o4d\wt-quality-trigs\src
+      -DepthOffsets -DepthEdgePx 2 -LearnAppearance -HoldoutViews 3
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Capture,
@@ -456,7 +456,7 @@ $chunk = ""
 if ($ChunkSeconds -gt 0) { $chunk = "--config.temporal-chunk-len-s $ChunkSeconds --config.temporal-chunk-visit-steps 1000" }
 # Clips longer than one chunk window: cap splat lifetimes (temporal sigma). Uncapped, a row's
 # lifetime grows for free while only its own window is trained, and it then hangs, frozen, in
-# other windows' frames (haze in front of a moving head; professor full run). 0.5 s removed it.
+# other windows' frames (haze in front of a moving head; full 377-frame test capture). 0.5 s removed it.
 if ($ChunkSeconds -gt 0 -and $MaxSigmaT -gt 0 -and ($count / $fps) -gt $ChunkSeconds -and
     $TrainExtra -notmatch "max-sigma-t") {
     $chunk += " --config.max-sigma-t $MaxSigmaT"
@@ -492,25 +492,56 @@ $exportCmd += "$py `"$Repo\deliver\make-trigs-timeline.py`" from-checkpoint --ou
     "del `"$exportCkpt`""
 Run-Stage "export" (Join-Path $Out "runs\$Name\$Name.trigsbin") $exportCmd "export-$Name"
 
-# asog: Animated SOG (.asog) for the three.js / PlayCanvas players of the animated-sog fork
-# (prep\windows\asog_convert.ps1 explains the options). The SH palette k-means runs on the GPU
-# (-AsogDevice cuda; minutes instead of ~90 min on CPU for 3M splats); use cpu while another job
-# trains on the GPU.
+# asog: Animated SOG (.asog) for the three.js / PlayCanvas players (arrival-space/animated-sog).
+# The .trigsbin of the export stage is +Y up with the trainer's wxyz quaternions, which
+# make-trigs-timeline.py labels xyzw; the players expect y down. This stage takes animated-sog's
+# own route: `asog flipbook flip` turns a fresh export copy 180 deg about z and writes xyzw
+# quaternions, make-trigs-timeline.py packs it to runs\<Name>\<Name>_ydown.trigsbin, and
+# `asog encode` needs no extra options. The SH palette k-means runs on the GPU when there is one
+# (-AsogDevice cpu hides CUDA, e.g. while another job trains). The encoder is the asog package
+# of the environment, or a checkout: -AsogRepo, else animated-sog-fork or animated-sog next to
+# this repo when present.
 if ($Stages -contains "asog") {
-    if (-not $AsogRepo) { $AsogRepo = Join-Path (Split-Path -Parent $Repo) "animated-sog-fork" }
-    if (-not (Test-Path (Join-Path $AsogRepo "python\src\asog"))) { throw "no animated-sog fork at $AsogRepo (-AsogRepo)" }
-    $trigsbin = "runs\$Name\$Name.trigsbin"
-    if (-not (Test-Path (Join-Path $Out $trigsbin))) { throw "no $trigsbin to convert; run the export stage" }
+    if (-not $AsogRepo) {
+        foreach ($d in "animated-sog-fork", "animated-sog") {
+            $c = Join-Path (Split-Path -Parent $Repo) $d
+            if (Test-Path (Join-Path $c "python\src\asog")) { $AsogRepo = $c; break }
+        }
+    }
+    $asogEnv = ""
+    $encodeOpts = ""
+    if ($AsogRepo) {
+        if (-not (Test-Path (Join-Path $AsogRepo "python\src\asog"))) { throw "no animated-sog checkout at $AsogRepo (-AsogRepo)" }
+        $AsogRepo = (Resolve-Path $AsogRepo).Path   # stages run from $Out
+        $asogEnv = "set `"PYTHONPATH=$AsogRepo\python\src`" && "
+        # --palette-device where the encoder has it (CPU k-means without the size limit)
+        if (Select-String -Path (Join-Path $AsogRepo "python\src\asog\cli.py") -Pattern "palette-device" -Quiet) {
+            $encodeOpts = " --palette-device $AsogDevice"
+        }
+    }
+    if ($AsogDevice -eq "cpu") { $asogEnv = "set `"CUDA_VISIBLE_DEVICES=-1`" && " + $asogEnv }
+    if (-not (Test-Path (Join-Path $Out "runs\$srcRun\trigs_ckpt.pt"))) { throw "no checkpoint runs\$srcRun\trigs_ckpt.pt to convert" }
     $extra = ($AsogArgs | ForEach-Object { $_ }) -join " "
-    Run-Stage "asog" (Join-Path $Out "runs\$Name\$Name.asog") `
-        ("$(if ($AsogDevice -eq 'cpu') { 'set "CUDA_VISIBLE_DEVICES=-1" && ' })set `"PYTHONPATH=$AsogRepo\python\src`" && " +
-         "$py -m asog.cli encode $trigsbin runs\$Name\$Name.asog --quat-order wxyz --transform z180 " +
-         "--palette-device $AsogDevice $extra 2>&1 && $py -m asog.cli info runs\$Name\$Name.asog") "asog-$Name"
-    $root = Split-Path -Parent $AsogRepo
+    $asogCkpt = "runs\$Name\asog_ckpt.pt"
+    $ydownCkpt = "runs\$Name\asog_ckpt_ydown.pt"
+    $ydownBin = "runs\$Name\${Name}_ydown.trigsbin"
+    $asogFile = "runs\$Name\$Name.asog"
+    Run-Stage "asog" (Join-Path $Out $asogFile) (
+        "$py `"$Repo\deliver\prepare_export_checkpoint.py`" --checkpoint runs\$srcRun\trigs_ckpt.pt " +
+        "--output $asogCkpt --min-opacity $PruneOpacity --n-frames $count --fps $fps --overwrite && " +
+        "$asogEnv$py -m asog.cli flipbook flip $asogCkpt $ydownCkpt 2>&1 && " +
+        "$py `"$Repo\deliver\make-trigs-timeline.py`" from-checkpoint --output $ydownBin " +
+        "--checkpoint $ydownCkpt --frame-rate $fps --max-chunk-duration-seconds $PackChunkSeconds " +
+        "--chunk-overlap-seconds 0 --tensor-dtype $TensorDtype --overwrite --fade-frames 0 && " +
+        "del `"$asogCkpt`" `"$ydownCkpt`" && " +
+        "$asogEnv$py -m asog.cli encode $ydownBin $asogFile$encodeOpts $extra 2>&1 && " +
+        "$asogEnv$py -m asog.cli info $asogFile") "asog-$Name"
+    $root = Split-Path -Parent $Repo
     if ($Out.StartsWith($root)) {
-        $rel = (Join-Path $Out "runs\$Name\$Name.asog").Substring($root.Length).TrimStart('\').Replace('\', '/')
+        $player = if ($AsogRepo -and (Split-Path -Parent $AsogRepo) -eq $root) { Split-Path -Leaf $AsogRepo } else { "animated-sog" }
+        $rel = (Join-Path $Out $asogFile).Substring($root.Length).TrimStart('\').Replace('\', '/')
         Write-Host "Player: powershell -File prep\windows\asog_convert.ps1 -SkipEncode -Serve, then open" -ForegroundColor Green
-        Write-Host "  http://localhost:8765/$(Split-Path -Leaf $AsogRepo)/examples/three/?src=/$rel" -ForegroundColor Green
+        Write-Host "  http://localhost:8765/$player/examples/three/?src=/$rel" -ForegroundColor Green
     }
 }
 

@@ -79,13 +79,17 @@ How this differs from the Linux guide, and why:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
-    -Capture datasets\professor -Rotate l
+    -Capture datasets\<capture> -Rotate l
 ```
 
 This processes the whole capture with the [default recipe](#default-recipe--preset-best) and
 ends with `runs\full\full.asog` for the three.js player ([Play in the browser](#play-in-the-browser)).
 Training takes about 0.6 s per step, i.e. about 100 s per frame: about 10 h for the
-377-frame `professor` capture on an RTX 3070.
+377-frame test capture on an RTX 3070.
+
+The measurements in this file come from one test capture: 6 Azure Kinect DK devices,
+1080×1920 portrait colour, NFOV depth, 377 frames at 30 fps, recorded in 2021 in the capture
+stage described at <https://github.com/FilipeLopesPires/HoloStudio#capture-studio>.
 
 Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 
@@ -103,7 +107,7 @@ Stages, in order. All paths are under `<capture>\o4d` (`-Out` to change):
 | `init` | `prep-roma-trigs-memory.py`, or `prep\init\depth_init.py` with `-Init depth` | the keyframe file, see below |
 | `train` | `trigs-train-colmap` | `runs\<Name>\trigs_ckpt.pt` |
 | `export` | `deliver\prepare_export_checkpoint.py` + `trigs-export-plys` + `make-trigs-timeline.py` (see [Export and file size](#export-and-file-size)) | `runs\<Name>\<Name>.trigsbin` |
-| `asog` | `asog encode` from the `animated-sog-fork` checkout next to this repo (`-AsogRepo` to change), on the CPU | `runs\<Name>\<Name>.asog` |
+| `asog` | `asog flipbook flip` + `make-trigs-timeline.py` + `asog encode` (see [Play in the browser](#play-in-the-browser)) | `runs\<Name>\<Name>.asog` |
 
 `refine`, `consistent`, `offsets`, `register` and `foregrounds` are added automatically when the option that
 needs them is given and their output is missing; you do not list them in `-Stages`.
@@ -166,8 +170,7 @@ masks to remove that ambiguity. All are off by default.
 | `-TrainExtra "<args>"` | Appended verbatim to the `trigs-train-colmap` command. |
 | `-TrainerSrc <dir>` | Runs `train` and `export` with `PYTHONPATH=<dir>`, to try another trainer checkout without reinstalling it. |
 
-Further options (trainer branch `quality-fixes` of `open4dgs-trigs-fork`, e.g. with
-`-TrainerSrc`; all off by default):
+Further options (need the trainer from `open4dgs-trigs-fork`; all off by default):
 
 | Parameter | Effect |
 |---|---|
@@ -224,11 +227,11 @@ step 4000):
 - Novel views between the cameras look nearly the same for all three. The views next to the
   held-out camera are slightly cleaner with qA2.
 
-Earlier recipe, 3 s of the `professor` capture:
+Earlier recipe, 3 s of the test capture:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
-    -Capture datasets\professor -Rotate l -Stages init,train,export -Name all3s `
+    -Capture datasets\<capture> -Rotate l -Stages init,train,export -Name all3s `
     -FrameEnd 90 -Steps 15000 -ChunkSeconds 0 -MasksDir masks_refined -Init depth `
     -DepthLoss 1.0 -Composite -MaxAnisotropy 10 -AlphaOutsideWeight 1.0
 ```
@@ -251,7 +254,7 @@ Result on an RTX 3070 (about 2.5 h of training, 3.8 GB of GPU memory):
 - 1.08 M splats; the `.trigsbin` was 353 MB for 3 s with the old export and is 178 MB
   with the current defaults (see [Export and file size](#export-and-file-size)).
 
-Measured on an RTX 3070 with the `professor` capture (6 cameras, 1080×1920, 377 frames):
+Measured on an RTX 3070 with the test capture (6 cameras, 1080×1920, 377 frames):
 
 | Stage | Time | Notes |
 |---|---|---|
@@ -281,23 +284,37 @@ shoe soles (the points farthest from the centre).
 
 ### Play in the browser
 
-The `asog` stage converts the `.trigsbin` to Animated SOG with the
-[animated-sog](https://github.com/FilipeLopesPires/animated-sog) fork: about 9x smaller (the
-3 s `professor` clip: 178 MB → 20.5 MB), with full spherical harmonics. It passes
-`--quat-order wxyz` (the exporter labels its wxyz quaternions `xyzw`), `--transform z180`
-(our world is +Y up, `.asog` is y down) and keeps the trained temporal threshold (0.01). Other
-encoder options go through `-AsogArgs`, e.g. `-AsogArgs '--prune','0'` keeps the 30% of the
-dynamic splats the encoder drops by default. The encode runs on the CPU: about 10 min per
-million splats.
+The `asog` stage converts the run to Animated SOG with
+[animated-sog](https://github.com/arrival-space/animated-sog): about 9x smaller than the
+`.trigsbin` (the 3 s test clip: 178 MB → 20.5 MB), with full spherical harmonics.
+
+The export stage's `.trigsbin` is +Y up and holds the trainer's wxyz quaternions, which
+`make-trigs-timeline.py` labels `xyzw`; the players expect y down. So the stage takes
+animated-sog's own route: `asog flipbook flip` turns a fresh export copy 180° about z and
+writes xyzw quaternions, `make-trigs-timeline.py` packs it to `runs\<Name>\<Name>_ydown.trigsbin`,
+and `asog encode` turns that into `runs\<Name>\<Name>.asog` with no extra options.
+
+- The encoder is the `asog` package of the environment, or a checkout: `-AsogRepo <dir>`, else
+  `animated-sog-fork` or `animated-sog` next to this repo when present.
+- Encoder options go through `-AsogArgs`, e.g. `-AsogArgs '--prune','0'` keeps the 30% of the
+  dynamic splats the encoder drops by default.
+- The SH palette k-means runs on the GPU when there is one (minutes for 3 M splats).
+  `-AsogDevice cpu` hides CUDA, e.g. while another job trains; without CUDA the stock encoder
+  limits the palette size.
+- The players fade splats with a temporal threshold of 0.05; the runs train with 0.01, so short-lived
+  splats (fast hands) fade slightly earlier in the player than in training.
 
 Serve the player and open the URL the stage prints:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -SkipEncode -Serve
-# http://localhost:8765/animated-sog-fork/examples/three/?src=/open4dgs-core-fork/datasets/<capture>/o4d/runs/<Name>/<Name>.asog
+powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -Serve
+# http://localhost:8765/animated-sog/examples/three/?src=/open4dgs-core/datasets/<capture>/o4d/runs/<Name>/<Name>.asog
 ```
 
 The server shares the folder that holds both repositories; three.js comes from a CDN.
+`asog_convert.ps1 -Trigsbin <run>\<Name>_ydown.trigsbin -Out <file>.asog -EncodeArgs ...` re-encodes
+with other encoder options. `asog_fidelity.py` compares an `.asog` with the run's PLYs, and
+`asog_screenshots.mjs` takes headless screenshots of the player.
 
 ### Export and file size
 
@@ -328,7 +345,7 @@ Example: re-export the `all3s` run with the current settings, without retraining
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File prep\windows\run_kinect_pipeline.ps1 `
-    -Capture datasets\professor -Stages export -FromRun all3s -Name all3s_compressed -CompressPly
+    -Capture datasets\<capture> -Stages export -FromRun all3s -Name all3s_compressed -CompressPly
 ```
 
 **Temporal threshold.** Each row's opacity fades with a Gaussian in time, renormalised so it
@@ -348,7 +365,7 @@ chunks split the 3 s run into 2 clips (0 to 2.5 s, 2.5 to 3 s) and stored 31% of
 twice. Longer clips keep more rows resident at once in the player; lower
 `-PackChunkSeconds` if the editor runs out of memory on a long capture.
 
-Measured on the 3 s `professor` run (`all3s`, 1,078,242 rows):
+Measured on the 3 s run of the test capture (`all3s`, 1,078,242 rows):
 
 | | `.trigsbin` | Rows stored | Bytes per row |
 |---|---|---|---|

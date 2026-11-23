@@ -1,20 +1,25 @@
 // Screenshots of an .asog in the animated-sog three.js player (examples/three), headless.
 //
-// Needs playwright-core in C:\o4d\asog-tools (npm install playwright-core@1.57.0 there) and Playwright's
-// Chromium (%LOCALAPPDATA%\ms-playwright\chromium-*), or pass --browser <chrome.exe / msedge.exe>.
-// The player must be served (asog_convert.ps1 -Serve, or python -m http.server 8765 in the Open4DGS folder).
+// Needs playwright-core (npm install playwright-core@1.57.0, next to this script or in any folder given
+// with --playwright <dir> or the PLAYWRIGHT_CORE_DIR environment variable) and Playwright's Chromium
+// (%LOCALAPPDATA%\ms-playwright\chromium-*), or pass --browser <chrome.exe / msedge.exe>.
+// The player must be served (asog_convert.ps1 -Serve, or python -m http.server 8765 in the folder of both repos).
 //
-//   node asog_screenshots.mjs <player url> <out dir> [--times 0.1,2.9] [--side] [--browser exe]
+//   node asog_screenshots.mjs <player url> <out dir> [--times 0.1,2.9] [--side] [--browser exe] [--playwright dir]
 //
 // Pauses the player's clock at each time, waits for the depth sort to catch up and saves
 // <out>/<name>_t<time>_<view>.png (views: front = the viewer's framing, side = 90 deg around the target).
 import fs from "node:fs";
 import path from "node:path";
-const { chromium } = await import("file:///C:/o4d/asog-tools/node_modules/playwright-core/index.mjs");
+import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 const url = args[0], out = args[1];
 const opt = (k, d) => { const i = args.indexOf(k); return i < 0 ? d : args[i + 1]; };
+const pwDir = opt("--playwright", process.env.PLAYWRIGHT_CORE_DIR);
+const { chromium } = await import(pwDir
+    ? pathToFileURL(path.join(pwDir, "node_modules", "playwright-core", "index.mjs")).href
+    : "playwright-core");
 const times = opt("--times", "0.1,2.9").split(",").map(Number);
 const views = args.includes("--side") ? ["front", "side"] : ["front"];
 const name = opt("--name", "asog");

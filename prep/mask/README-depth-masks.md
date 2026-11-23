@@ -35,7 +35,7 @@ Outputs:
 | `mask_report/masks.json` | Depth source, estimated floor plane, all parameters used, per-camera coverage statistics. |
 | `mask_report/mask_sheet.jpg` | QA sheet: 5 sample frames × all cameras, background dimmed, mask outline in green. |
 
-Measured on the `professor` Azure Kinect capture (6 cameras, 1080×1920, 377 frames):
+Measured on the test capture (6 cameras, 1080×1920, 377 frames):
 all masks in 83 s on the CPU. The subject covers about 9–10% of each image. The
 per-camera floor offsets were 0.1–2.1 cm.
 

@@ -58,7 +58,7 @@ For every keyframe t (`--frame-start`, then every `--keyframe-step` frames up to
    `depth_masks.main_cluster`, with `--cluster-voxel` 5 cm and `--cluster-keep-ratio` 0.15.
 4. **Colour.** Per-channel median of the bilinearly sampled images of every camera
    whose depth agrees with the point within `--colour-margin` (3 cm). The source camera
-   always counts. On the professor capture a point is coloured from 2.65 views on
+   always counts. On the test capture a point is coloured from 2.65 views on
    average.
 5. **Velocity.** Per camera, dense DIS optical flow (OpenCV, CPU) from t to t+d and
    from t to t−d, each checked forward-backward (`--fb-max-px`, 1 work pixel). Both
@@ -150,7 +150,7 @@ trainer uses `source_frames` (not `times`) for timing when `--start-frame` /
 
 | Option | Default | Notes |
 |---|---|---|
-| `--target-points` | 60000 | Max points per keyframe. The voxel size follows from it (7.2 mm on the professor capture). |
+| `--target-points` | 60000 | Max points per keyframe. The voxel size follows from it (7.2 mm on the test capture). |
 | `--keyframe-step` | 5 | Same as prep-roma. |
 | `--depth-source`, `--depth-dir`, `--depth-scale` | auto | As in `depth_masks.py`. |
 | `--depth-offsets-json` | — | Per-camera additive depth corrections from `prep/extract/k4a_depth_offsets.py` (see [Depth offsets](#depth-offsets)). Off by default. |
@@ -160,7 +160,7 @@ trainer uses `source_frames` (not `times`) for timing when `--start-frame` /
 | `--velocity-mode` | centred | `forward` uses only t → t+d where it exists. |
 | `--flow-preset` | medium | DIS preset: ultrafast, fast, medium. |
 | `--velocity-smooth-k` | 8 | 1 turns smoothing off. |
-| `--min-votes` | 2 | 1 keeps points that only their own camera can see. On the professor capture these were background pixels at the dilated mask border, up to 3.6 m from the subject. |
+| `--min-votes` | 2 | 1 keeps points that only their own camera can see. On the test capture these were background pixels at the dilated mask border, up to 3.6 m from the subject. |
 | `--cluster-voxel` | 0.05 | 0 keeps every 3D cluster. |
 | `--export-ply-dir` | — | Writes `depth_init_f<frame>.ply` per keyframe (xyz, rgb, vx vy vz). |
 | `--stats-path` | — | JSON with per-keyframe counts, speeds and timings. |
@@ -177,12 +177,12 @@ every `--depth-source`. A camera missing from the file is an error. The NPZ reco
 offsets as `depth_offsets_m` (float32 [C]) and `depth_offsets_cameras` (folder names);
 `--stats-path` records them too. Without the option nothing changes.
 
-On the professor capture (frames 1–31, `masks_refined`, 60,000 target points), the
+On the test capture (frames 1–31, `masks_refined`, 60,000 target points), the
 corrected run (`keyframes_depth_refined_doff_f0001-0031.npz`) fuses into a voxel of
 6.8–6.9 mm against 7.0–7.1 mm without offsets: the six cameras' surfaces coincide
 better. Both runs took 14 s.
 
-## Measured on the professor capture
+## Measured on the test capture
 
 6 Azure Kinects, 1080×1920, frames 1–31 (7 keyframes), CPU only (shared with a
 running training job):

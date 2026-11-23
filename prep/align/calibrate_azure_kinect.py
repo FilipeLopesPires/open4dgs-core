@@ -28,7 +28,7 @@ Outputs in ``--data-dir``::
 
 Example::
 
-    python prep/align/calibrate_azure_kinect.py --data-dir datasets/professor/o4d
+    python prep/align/calibrate_azure_kinect.py --data-dir datasets/<capture>/o4d
 """
 
 from __future__ import annotations

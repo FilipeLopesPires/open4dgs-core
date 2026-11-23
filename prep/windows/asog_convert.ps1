@@ -1,72 +1,85 @@
 <#
 .SYNOPSIS
-  Convert an Open4DGS TRiGS export (.trigsbin) to Animated SOG (.asog) with the animated-sog fork, and
-  serve the fork's three.js player on it.
+  Serve the animated-sog three.js player on local .asog files, and optionally encode a y-down
+  .trigsbin to .asog first.
 
 .DESCRIPTION
-  Encoder: animated-sog-fork\python (run from source with PYTHONPATH, inside C:\o4d\venv: it only needs
-  numpy + torch, both already there; nothing is installed). The SH palette k-means runs on the CPU
-  (torch, --palette-device cpu) and CUDA is hidden, so a training job on the GPU is not disturbed.
+  run_kinect_pipeline.ps1 -Stages asog is the usual way to make an .asog: it turns the run's
+  checkpoint y down (`asog flipbook flip`), packs <Name>_ydown.trigsbin and encodes it. This script
+  re-encodes such a y-down .trigsbin with other encoder options (-EncodeArgs), and serves the
+  player for any .asog under the folder that holds this repo and the animated-sog checkout.
 
-  Our .trigsbin files need three encoder options (added in the fork):
-    --quat-order wxyz   make-trigs-timeline.py copies the trainer's wxyz quaternions but labels them "xyzw"
-    --transform z180    our world is +Y up (floor at y = 0); .asog is y down (players turn it 180 deg about z)
-    (temporal threshold) read from the file (semantics.temporalCullThreshold = 0.01) and kept in the .asog
-                         as motion.threshold; the players honour it (default 0.05 only when absent)
-
-  Encoder quality / size options are left at their defaults (qp 2, qa 8, prune 0.3, mbits 14, tbits 11,
-  lsbits 8, shk 65536, level 9); pass more with -EncodeArgs, e.g. -EncodeArgs '--prune','0'.
+  The encoder is the asog package of the environment (-EnvCmd), or a checkout: -AsogRepo, else
+  animated-sog-fork or animated-sog next to this repo when present. Encoder options are left at
+  their defaults; pass more with -EncodeArgs, e.g. -EncodeArgs '--prune','0'.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1                     # all3s_compressed
-  powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -Run all3s_fixed
-  powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -SkipEncode -Serve  # player only
+  powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 -Serve        # player only
+  powershell -ExecutionPolicy Bypass -File prep\windows\asog_convert.ps1 `
+      -Trigsbin <capture>\o4d\runs\<Name>\<Name>_ydown.trigsbin -Out <capture>\o4d\runs\<Name>\<Name>_p0.asog `
+      -EncodeArgs '--prune','0' -Check -Serve
 #>
 param(
-    [string]$Capture = "",                    # capture folder (default: datasets\professor); runs in <Capture>\o4d\runs
-    [string]$Run = "all3s_compressed",        # run folder under <Capture>\o4d\runs, holding <Run>.trigsbin
-    [string]$Trigsbin = "",                   # explicit input (default: runs\<Run>\<Run>.trigsbin)
-    [string]$Out = "",                        # explicit output (default: runs\asog\<Run>.asog)
+    [string]$Trigsbin = "",                   # y-down .trigsbin to encode (none: only serve)
+    [string]$Out = "",                        # output (default: next to the .trigsbin, .asog)
     [string[]]$EncodeArgs = @(),              # extra `asog encode` options
-    [switch]$SkipEncode,                      # only (re)serve
-    [switch]$Check,                           # also run `asog check` (error report against the .trigsbin, ~1-2 min)
+    [ValidateSet("cuda", "cpu")][string]$Device = "cuda",   # cpu hides CUDA (e.g. while a job trains)
+    [string]$AsogRepo = "",                   # animated-sog checkout (default: next to this repo, else the installed package)
+    [string]$EnvCmd = "C:\o4d\o4d-env.cmd",   # environment script from setup_env.ps1
+    [switch]$SkipEncode,                      # kept for older command lines: only serve
+    [switch]$Check,                           # also run `asog check` (error report against the .trigsbin)
     [switch]$Serve,                           # start a static server for the player (in this window)
     [int]$Port = 8765
 )
 $ErrorActionPreference = "Stop"
 
-$Core = (Resolve-Path "$PSScriptRoot\..\..").Path                        # open4dgs-core-fork
-$Root = Split-Path $Core -Parent                                          # Open4DGS (both repos)
-$Fork = Join-Path $Root "animated-sog-fork"
-if (-not $Capture) { $Capture = Join-Path $Core "datasets\professor" }
-$Runs = Join-Path (Resolve-Path $Capture).Path "o4d\runs"
-if (-not $Trigsbin) { $Trigsbin = Join-Path $Runs "$Run\$Run.trigsbin" }
-if (-not $Out) { $Out = Join-Path $Runs "asog\$Run.asog" }
-New-Item -ItemType Directory -Force (Split-Path $Out -Parent) | Out-Null
+$Core = (Resolve-Path "$PSScriptRoot\..\..").Path
+$Root = Split-Path $Core -Parent                                          # folder of both repos
+if (-not $AsogRepo) {
+    foreach ($d in "animated-sog-fork", "animated-sog") {
+        if (Test-Path (Join-Path $Root "$d\python\src\asog")) { $AsogRepo = Join-Path $Root $d; break }
+    }
+}
+$asogEnv = ""
+if ($AsogRepo) {
+    $AsogRepo = (Resolve-Path $AsogRepo).Path
+    $asogEnv = "set `"PYTHONPATH=$AsogRepo\python\src`" && "
+}
+if ($Device -eq "cpu") { $asogEnv = "set `"CUDA_VISIBLE_DEVICES=-1`" && " + $asogEnv }
 
 function Invoke-Asog([string[]]$AsogArgs) {
     $quoted = ($AsogArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join " "
-    # CUDA hidden: CPU only. PYTHONPATH: the fork's encoder from source.
-    $line = "call C:\o4d\o4d-env.cmd >nul 2>nul && set `"CUDA_VISIBLE_DEVICES=-1`" && set `"PYTHONPATH=$Fork\python\src`" && python -m asog.cli $quoted 2>&1"   # log on stdout (PowerShell 5.1 turns stderr lines into errors)
-    cmd /c $line
+    # log on stdout (PowerShell 5.1 turns stderr lines into errors)
+    cmd /d /c "call `"$EnvCmd`" >nul 2>nul && $asogEnv python -m asog.cli $quoted 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "asog $($AsogArgs[0]) failed ($LASTEXITCODE)" }
 }
 
-if (-not $SkipEncode) {
-    if (-not (Test-Path $Trigsbin)) { throw "no input $Trigsbin" }
+if ($Trigsbin -and -not $SkipEncode) {
+    $Trigsbin = (Resolve-Path $Trigsbin).Path
+    if (-not $Out) { $Out = [IO.Path]::ChangeExtension($Trigsbin, ".asog") }
+    $Out = [IO.Path]::GetFullPath($Out)
+    New-Item -ItemType Directory -Force (Split-Path $Out -Parent) | Out-Null
+    $opts = @()
+    if ($AsogRepo -and (Select-String -Path (Join-Path $AsogRepo "python\src\asog\cli.py") -Pattern "palette-device" -Quiet)) {
+        $opts = @("--palette-device", $Device)
+    }
     $t0 = Get-Date
-    Invoke-Asog (@("encode", $Trigsbin, $Out, "--quat-order", "wxyz", "--transform", "z180", "--palette-device", "cpu") + $EncodeArgs)
+    Invoke-Asog (@("encode", $Trigsbin, $Out) + $opts + $EncodeArgs)
     "encode: {0:n0} s" -f ((Get-Date) - $t0).TotalSeconds
     Invoke-Asog @("info", $Out)
     "{0}: {1:n1} MB  <-  {2}: {3:n1} MB" -f $Out, ((Get-Item $Out).Length / 1MB), $Trigsbin, ((Get-Item $Trigsbin).Length / 1MB)
     if ($Check) { Invoke-Asog @("check", $Trigsbin, $Out) }
 }
 
-# the player: serve the Open4DGS folder (fork + data under one origin); three.js comes from the jsDelivr CDN
-$rel = $Out.Substring($Root.Length).TrimStart('\').Replace('\', '/')
-$url = "http://localhost:$Port/animated-sog-fork/examples/three/?src=/$rel"
-"player: $url"
+# the player: serve the folder of both repos (player + data under one origin); three.js comes from the jsDelivr CDN
+$player = if ($AsogRepo -and (Split-Path -Parent $AsogRepo) -eq $Root) { Split-Path -Leaf $AsogRepo } else { "animated-sog" }
+if ($Out -and $Out.StartsWith($Root)) {
+    $rel = $Out.Substring($Root.Length).TrimStart('\').Replace('\', '/')
+    "player: http://localhost:$Port/$player/examples/three/?src=/$rel"
+} else {
+    "player: http://localhost:$Port/$player/examples/three/?src=/<path of the .asog under $Root>"
+}
 if ($Serve) {
     "serving $Root on port $Port (Ctrl+C stops)"
-    & C:\o4d\venv\Scripts\python.exe -m http.server $Port --bind 127.0.0.1 --directory $Root
+    cmd /d /c "call `"$EnvCmd`" >nul 2>nul && python -m http.server $Port --bind 127.0.0.1 --directory `"$Root`""
 }

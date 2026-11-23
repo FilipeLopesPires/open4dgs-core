@@ -6,7 +6,7 @@ from `depth_masks.py`, but any source with the same layout works. Registered dep
 SAM 2 person segmentation are optional extra cues.
 
 Why: depth masks are deliberately generous (splat, close and a 6 px safety dilation, plus
-calibration error between sensors). On the `professor` capture they include floor around
+calibration error between sensors). On the test capture they include floor around
 the feet and chair legs, pieces of wall and light stands next to the head, and a red object
 above the head in camera 0001. The trainer learns those patches as opaque splats (halo and
 floaters). The refined masks follow the silhouette of person, chair and laptop with a 2–3 px
@@ -34,8 +34,8 @@ Outputs (the coarse masks are never modified; `--output-dir masks` is refused):
 | `mask_report/refine.json` | Parameters, floor source, SAM settings, timing, per-camera statistics. |
 | `mask_report/refine_sheet.jpg` | QA sheet: one row per QA frame, one tile per camera, cropped to the coarse mask. Background dimmed (blue) by the refined mask, coarse outline red, refined outline green. |
 
-Measured on the `professor` capture (6 cameras, 1080×1920, 377 frames, 2262 masks):
-see [Results](#results-on-the-professor-capture).
+Measured on the test capture (6 cameras, 1080×1920, 377 frames, 2262 masks):
+see [Results](#results-on-the-test-capture).
 
 ## Inputs
 
@@ -122,7 +122,7 @@ safer choice when a subject part is thin, fast and poorly coloured (see
 `prep/mask/consistent_masks.py` is an opt-in post-pass over the refined masks that uses all
 cameras of a frame at once (`refine_masks.py` itself is unchanged). Each camera decides on
 its own, so a part that one camera drops is learned as transparent from that view: on
-`professor` (frames 1, 40, 90) 5.3% of the masked depth points of one camera land outside
+the test capture (frames 1, 40, 90) 5.3% of the masked depth points of one camera land outside
 another camera's refined mask, 11% at the top of the head (hair against a dark wall, no
 ToF depth on dark hair) and 13% at the chair seat height (black chair shell: no depth at
 all, so the coarse depth mask has a hole that refining cannot fill; laptop lid edges).
@@ -175,7 +175,7 @@ that reads with `cv2.IMREAD_UNCHANGED` gets 4 channels (B = G = R = grey, A = co
 and raw PIL / imageio arrays have 2 channels; such readers must take channel 0 as the mask.
 The trainer ignores unknown pixels in its mask and composite losses.
 
-### Results (professor, frames 1–90)
+### Results (test capture, frames 1–90)
 
 Silhouette consistency (fraction of camera-i masked depth points, not occluded, outside
 ≥ 1 other mask; frames 1, 40, 90):
@@ -240,7 +240,7 @@ Use `--qa-only` (or `--frames` with a few frames) and look at
   consecutive frames for both mask sets, `frames_with_area_jump_gt_10pct` lists (up to 50)
   frames whose refined area changed by more than 10% from the previous frame.
 
-## Results on the professor capture
+## Results on the test capture
 
 All 377 frames × 6 cameras (`mask_report/refine.json`). Foreground = alpha > 127, as a
 percentage of the image; temporal IoU between consecutive frames:
@@ -289,7 +289,7 @@ shoe tips, the open laptop lid (also seen edge-on) and the chair seat and back a
   does the black chair shell, which has no ToF depth in any camera (the consistency pass
   labels it unknown).
 - Refining drops few pixels with subject-volume depth (30–80 edge-safe pixels per camera
-  and frame at half resolution on `professor`, all decided by GrabCut colour, none by the
+  and frame at half resolution on the test capture, all decided by GrabCut colour, none by the
   unclaimed-pixel rule); `consistent_masks.py --keep-volume` restores those that another
   camera confirms.
 - Without depth, background with the subject's colour next to the subject (dark wall next

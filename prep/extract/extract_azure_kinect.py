@@ -29,9 +29,9 @@ Extrinsics are *not* stored in the recordings; run
 Example::
 
     python prep/extract/extract_azure_kinect.py inspect \
-        --input-dir datasets/professor --output-dir datasets/professor/o4d --rotate l
+        --input-dir datasets/<capture> --output-dir datasets/<capture>/o4d --rotate l
     python prep/extract/extract_azure_kinect.py extract \
-        --input-dir datasets/professor --output-dir datasets/professor/o4d --rotate l
+        --input-dir datasets/<capture> --output-dir datasets/<capture>/o4d --rotate l
 """
 
 from __future__ import annotations

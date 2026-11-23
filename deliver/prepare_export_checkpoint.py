@@ -19,7 +19,7 @@ two ways:
 
 2. Rows whose base opacity ``sigmoid(opacities)`` is below ``--min-opacity`` are
    removed (default 0.005, 0 keeps every row). Such a row adds at most 0.5 % alpha
-   to any pixel; on the 3 s ``professor`` run they are 9.3 % of the rows.
+   to any pixel; on the 3 s run of the test capture they are 9.3 % of the rows.
 
 A JSON record of what was resolved and removed is written next to the output
 (``<output>.json``).

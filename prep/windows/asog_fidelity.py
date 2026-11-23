@@ -1,7 +1,7 @@
 """CPU fidelity check of an .asog made from an Open4DGS run against the run's per-frame PLYs.
 
 Decodes the .asog with the animated-sog reference decoder (asog.decode, the players' twin), evaluates it at
-frame k / fps, turns it back to the trainer's y-up frame (undo the encoder's --transform z180) and compares
+frame k / fps, turns it back to the trainer's y-up frame (180 deg about z) and compares
 with plys/frame_<k>.ply (the checkpoint evaluated per frame by trigs' export_plys):
 
 - visible splat counts and the effective opacity mass (opacity x temporal weight);
@@ -11,7 +11,8 @@ with plys/frame_<k>.ply (the checkpoint evaluated per frame by trigs' export_ply
 - a CPU point render (alpha-weighted DC colour per pixel, orthographic front and side views) of both,
   their PSNR, and a side-by-side PNG.
 
-No GPU. Usage (inside C:\\o4d\\venv, PYTHONPATH=<animated-sog-fork>\\python\\src):
+No GPU. Usage (in the pipeline environment, with the asog package installed or
+PYTHONPATH=<animated-sog>\\python\\src):
     python asog_fidelity.py <clip.asog> <run>\\plys <out_dir> [--frames 0 45 89] [--fps 30]
 """
 
@@ -81,8 +82,9 @@ def main() -> None:
 
     clip = decode.read(args.asog)
     man = clip.manifest
-    z180 = man.get("source", {}).get("transform") == "z180"
-    back = np.array([-1.0, -1.0, 1.0]) if z180 else np.array([1.0, 1.0, 1.0])
+    # .asog clips are y down (the runner flips the checkpoint with `asog flipbook flip`; older
+    # files were encoded with --transform z180): turn them back to the PLYs' +Y up
+    back = np.array([-1.0, -1.0, 1.0])
     report = dict(asog=str(args.asog), count=clip.count, threshold=man["motion"].get("threshold", 0.05),
                   sm=man["motion"]["sm"], source=man.get("source"), frames={})
     rows = []

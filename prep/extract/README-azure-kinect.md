@@ -5,6 +5,10 @@ wired master/subordinate sync) into the layout the Open4DGS pipeline reads:
 `images/`, `sparse/0`, `reference_export.json` and `sync.json`. You do not need
 the Azure Kinect Sensor SDK. The tools read the MKV files with `ffmpeg` and `ffprobe`.
 
+The results quoted in these notes (the "test capture") come from 6 Azure Kinect DK devices
+recording 1080×1920 portrait colour and NFOV depth at 30 fps (377 frames), in the capture stage
+described at <https://github.com/FilipeLopesPires/HoloStudio#capture-studio>.
+
 | Step | Script | Produces |
 |---|---|---|
 | 1. Audit | `prep/extract/extract_azure_kinect.py inspect` | `k4a_report/inspect.json`, `timing.json`, `sync_sheet.jpg`, `depth_overlay.jpg` |
@@ -30,7 +34,7 @@ set the camera folder order `0001`, `0002`, and so on. The device recorded as
 `MASTER` defines logical time.
 
 ```bash
-CAP=datasets/professor           # folder holding the .mkv files
+CAP=datasets/<capture>           # folder holding the .mkv files
 OUT=$CAP/o4d                     # capture data directory for the pipeline
 
 python prep/extract/extract_azure_kinect.py inspect --input-dir $CAP --output-dir $OUT --rotate l
@@ -114,7 +118,7 @@ lock-in transients.
 | `k4a_report/calibration_reprojection.jpg` | Coloured dots from the other cameras land on the matching surfaces in every view. |
 | `k4a_report/calibration_fused.ply` | Opens in MeshLab or CloudCompare as one coherent scene, with no doubled surfaces. |
 
-Reference result for `datasets/professor` (6 devices, 1080p MJPEG, NFOV depth,
+Reference result for the test capture (6 devices, 1080p MJPEG, NFOV depth,
 30 fps):
 
 - Visual sync validation error: 0.12 frames.
@@ -178,7 +182,7 @@ at their projections. That check is reported, never applied. `sparse/0` from
 Consumers: `prep/init/depth_init.py --depth-offsets-json`. The trainer's depth loss
 implements the same contract.
 
-**Measured on `datasets/professor`** (12 frames over all 377, `masks_refined`, 12 s on
+**Measured on the test capture** (12 frames over all 377, `masks_refined`, 12 s on
 CPU). Twelve neighbour pairs were measured; opposite cameras never pass the facing test.
 
 - Offsets to add: 0001 −7.4, 0002 −9.5, 0003 −0.6, 0004 +4.7, 0005 +6.3, 0006 +6.5 mm.

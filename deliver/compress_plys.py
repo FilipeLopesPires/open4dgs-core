@@ -8,7 +8,7 @@ and the PlayCanvas engine load them; tools that only read the standard 3DGS PLY
 layout (``x, y, z, f_dc_*, f_rest_*, opacity, scale_*, rot_*`` as floats) do not,
 so this is an opt-in step (run_kinect_pipeline.ps1 -CompressPly).
 
-Measured on frame 44 of the 3 s ``professor`` run (371 k splats): 87.7 MB -> 22.8 MB,
+Measured on frame 44 of the 3 s run of the test capture (371 k splats): 87.7 MB -> 22.8 MB,
 45.6 dB PSNR on the subject against the uncompressed PLY, rendered from the six
 training cameras.
 """
