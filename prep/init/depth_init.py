@@ -195,9 +195,9 @@ def sample_bilinear(img: np.ndarray, uf: np.ndarray, vf: np.ndarray) -> np.ndarr
     y0 = np.floor(y).astype(np.int64)
     ax = (x - x0)[:, None]
     ay = (y - y0)[:, None]
-    I = img.astype(np.float32)
-    return ((1 - ax) * (1 - ay) * I[y0, x0] + ax * (1 - ay) * I[y0, x0 + 1]
-            + (1 - ax) * ay * I[y0 + 1, x0] + ax * ay * I[y0 + 1, x0 + 1])
+    im = img.astype(np.float32)
+    return ((1 - ax) * (1 - ay) * im[y0, x0] + ax * (1 - ay) * im[y0, x0 + 1]
+            + (1 - ax) * ay * im[y0 + 1, x0] + ax * ay * im[y0 + 1, x0 + 1])
 
 
 # ======================================================================================
@@ -776,7 +776,7 @@ def main(argv=None) -> int:
     sync_off = load_sync_offsets(sync_path, cams, a.fps)
     print(f"[depth_init] {len(cams)} cameras, depth source '{source.name}', frames {a.frame_start}..{a.frame_end}, "
           f"{len(keyframes)} keyframes (step {a.keyframe_step}), target {a.target_points:,} points/keyframe")
-    print(f"[depth_init] sync offsets (frames): "
+    print("[depth_init] sync offsets (frames): "
           + (", ".join(f"{c.folder}={o:+.3f}" for c, o in zip(cams, sync_off)) if sync_path else "none"))
 
     inp = Inputs(a, cams, source)

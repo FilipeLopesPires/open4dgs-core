@@ -223,7 +223,7 @@ class DepthMasksSyntheticTests(unittest.TestCase):
 
     def scene(self, name, objects, noise=False, floor=True, **kw):
         renders = [render(c, objects, floor=floor) for c in self.cams]
-        depths = [add_floor_noise(d, l, seed=i) if noise else d for i, (d, l, _) in enumerate(renders)]
+        depths = [add_floor_noise(d, lab, seed=i) if noise else d for i, (d, lab, _) in enumerate(renders)]
         return write_dataset(self.tmp / name, self.cams, depths, **kw), renders
 
     # 1 ------------------------------------------------------------------------------

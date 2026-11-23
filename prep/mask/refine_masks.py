@@ -341,15 +341,15 @@ def segment_frame(img: np.ndarray, coarse: np.ndarray, depth_m: np.ndarray | Non
 # ======================================================================================
 def guided_filter(guide: np.ndarray, src: np.ndarray, radius: int, eps: float) -> np.ndarray:
     """Grey-guide guided filter (He et al.), box windows of size 2r+1."""
-    I = guide.astype(np.float32)
+    g = guide.astype(np.float32)
     k = (2 * radius + 1, 2 * radius + 1)
-    mI = cv2.boxFilter(I, -1, k)
+    mg = cv2.boxFilter(g, -1, k)
     mp = cv2.boxFilter(src, -1, k)
-    cov = cv2.boxFilter(I * src, -1, k) - mI * mp
-    var = cv2.boxFilter(I * I, -1, k) - mI * mI
+    cov = cv2.boxFilter(g * src, -1, k) - mg * mp
+    var = cv2.boxFilter(g * g, -1, k) - mg * mg
     a = cov / (var + eps)
-    b = mp - a * mI
-    return cv2.boxFilter(a, -1, k) * I + cv2.boxFilter(b, -1, k)
+    b = mp - a * mg
+    return cv2.boxFilter(a, -1, k) * g + cv2.boxFilter(b, -1, k)
 
 
 def finish_mask(prob_work: np.ndarray, img: np.ndarray, coarse: np.ndarray, sure_fg_work: np.ndarray | None,
